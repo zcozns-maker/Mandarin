@@ -1954,6 +1954,11 @@ u64 TextureCacheRuntime::GetDeviceMemoryBudget() const {
     return device.GetDeviceMemoryBudget();
 }
 
+bool TextureCacheRuntime::IsDeviceMemoryNearlyFull() const {
+    // Room for one 256 MiB VMA block or staging buffer plus some slack.
+    return device.IsMainHeapNearlyFull(384ULL << 20);
+}
+
 bool TextureCacheRuntime::CanDownloadMsaa(const VideoCommon::ImageInfo& info) const {
     const VkImageAspectFlags aspect_mask = ImageAspectMask(info.format);
     if ((aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT) != 0) {

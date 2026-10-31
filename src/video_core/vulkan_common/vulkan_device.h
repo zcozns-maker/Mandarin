@@ -968,6 +968,10 @@ FN_MAX_LIMIT_LIST
     /// budget. 0 without the extension.
     u64 GetDeviceMemoryBudget() const;
 
+    /// True when the main device-local heap has less than headroom bytes left in its budget,
+    /// counting VMA's half-empty blocks as used (new blocks still need that much free VRAM).
+    bool IsMainHeapNearlyFull(u64 headroom) const;
+
     u32 GetSetsPerPool() const {
         return sets_per_pool;
     }

@@ -316,6 +316,24 @@ void TextureCache<P>::TickFrame() {
             }
         }
     }
+    // The device-local heap itself is (nearly) full although the collector's figure, which leaves
+    // out VMA's half-empty blocks, is under its thresholds: MKW on an 8 GB card sat at 6142 of
+    // 6142 MiB with the cache reading 5538 MiB (critical 5573), until a 256 MiB staging buffer
+    // could not be allocated anywhere and Eden aborted. Collect now, at most twice a second.
+    if constexpr (requires { runtime.IsDeviceMemoryNearlyFull(); }) {
+        if (!emergency_collect && frame_tick >= last_heap_full_frame + 30 &&
+            runtime.IsDeviceMemoryNearlyFull()) {
+            last_heap_full_frame = frame_tick;
+            emergency_collect = true;
+            static u32 logged{};
+            if (logged++ < 16) {
+                LOG_WARNING(HW_GPU,
+                            "Video memory heap nearly full ({} MiB counted, critical {} MiB); "
+                            "freeing unused images now",
+                            total_used_memory >> 20, critical_memory >> 20);
+            }
+        }
+    }
     // Every 600 frames: device memory in use against the collector's thresholds, and what the
     // images themselves account for (VRAM pressure makes the collector thrash).
     if (static u64 frames{}; ++frames % 600 == 0) {

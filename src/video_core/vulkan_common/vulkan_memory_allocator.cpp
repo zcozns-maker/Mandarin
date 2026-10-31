@@ -448,9 +448,12 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         // 4. the pre-allocated host-visible reserve pool.
         NoteMemoryPressure();
         const char* placed = "video memory over budget";
+        // VkResult of each step, logged if every step fails (why system memory was refused).
+        std::array<int, 4> step_results{static_cast<int>(result), 0, 0, 0};
         VmaAllocationCreateInfo relaxed_ci = alloc_ci;
         relaxed_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateBuffer(allocator, &ci, &relaxed_ci, &handle, &allocation, &alloc_info);
+        step_results[1] = static_cast<int>(result);
         if (result != VK_SUCCESS) {
             placed = "system memory";
             VmaAllocationCreateInfo host_ci = relaxed_ci;
@@ -458,14 +461,21 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
             host_ci.preferredFlags = 0;
             host_ci.memoryTypeBits = 0;
             result = vmaCreateBuffer(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+            step_results[2] = static_cast<int>(result);
             if (result != VK_SUCCESS) {
                 placed = "a dedicated system memory allocation";
                 host_ci.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
                 host_ci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
                 result = vmaCreateBuffer(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+                step_results[3] = static_cast<int>(result);
             }
             if (result != VK_SUCCESS) {
                 LogOutOfMemory(device, "a buffer", ci.size);
+                LOG_WARNING(Render_Vulkan,
+                            "Buffer of {} bytes (usage {}): budget {}, over budget {}, system "
+                            "memory {}, dedicated system memory {}",
+                            ci.size, static_cast<u32>(usage), step_results[0], step_results[1],
+                            step_results[2], step_results[3]);
                 placed = "the out-of-memory reserve";
                 result = CreateBufferFromReserve(ci, usage, handle, allocation, alloc_info);
             }

@@ -138,6 +138,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 budget_check_frames{};
     u64 pressure_margin{};     ///< Thresholds lowered by this after allocations ran out of VRAM
     u64 last_pressure_frame{}; ///< Frame of the last out-of-memory response
+    u64 last_heap_full_frame{}; ///< Frame of the last "VRAM heap physically full" collection
     u64 astc_opaque_images{};
     u64 astc_alpha_images{};
     std::vector<u8> astc_scan_buffer;
