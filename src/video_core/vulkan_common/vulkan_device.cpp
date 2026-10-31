@@ -464,6 +464,21 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
     const bool is_amd = is_amd_driver || is_radv;
 
+    // PokeDinner PR 19 (Franseven, GPL-3.0) serializes pipeline compiles on AMD's Windows driver,
+    // which can crash compiling some pipelines concurrently. That makes first loads much slower,
+    // so Eden-NS2 keeps parallel compiles unless EDEN_NS2_SERIAL_PIPELINES=1 is set (the crash
+    // guard already isolates a crashing pipeline).
+#ifdef _WIN32
+    has_broken_parallel_compiling = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && [] {
+        const char* value = std::getenv("EDEN_NS2_SERIAL_PIPELINES");
+        return value != nullptr && value[0] == '1';
+    }();
+#endif
+    if (has_broken_parallel_compiling) {
+        LOG_WARNING(Render_Vulkan, "AMD proprietary driver: serializing pipeline compilation "
+                                   "(EDEN_NS2_SERIAL_PIPELINES=1)");
+    }
+
     const bool is_intel_windows = driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
     const bool is_intel_anv = driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
 

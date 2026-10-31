@@ -1731,12 +1731,62 @@ void RasterizerVulkan::WaitForIdle() {
 
     query_cache.NotifyWFI();
 
+    // Ported from PokeDinner (Franseven, PR 19, GPL-3.0): on AMD's Windows driver the wait-for-idle
+    // also has to make the writes visible (a memory barrier), or later draws read stale
+    // GPU-written vertex, index and indirect data.
+#ifdef _WIN32
+    const bool needs_memory_barrier = device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY;
+#else
+    constexpr bool needs_memory_barrier = false;
+#endif
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([event = *wfi_event, flags, needs_memory_barrier](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetEvent(event, flags);
-        cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
+        if (needs_memory_barrier) {
+            static constexpr VkMemoryBarrier memory_barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            };
+            cmdbuf.WaitEvents(event, flags, flags, memory_barrier, {}, {});
+        } else {
+            cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
+        }
     });
     fence_manager.SignalOrdering();
+}
+
+void RasterizerVulkan::Nx2Membar() {
+    // PokeDinner PR 19 (GPL-3.0): the Switch 2 PBDMA MEMBAR (MEM_OP_D operation 5). Draws after it
+    // must see GPU-written buffers; AMD's Windows driver needs the explicit barrier.
+#ifdef _WIN32
+    if (device.GetDriverID() != VK_DRIVER_ID_AMD_PROPRIETARY) {
+        return;
+    }
+    VkPipelineStageFlags flags =
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (device.IsExtTransformFeedbackSupported()) {
+        flags |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
+    }
+    query_cache.NotifyWFI();
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier memory_barrier{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        };
+        cmdbuf.SetEvent(event, flags);
+        cmdbuf.WaitEvents(event, flags, flags, memory_barrier, {}, {});
+    });
+    fence_manager.SignalOrdering();
+#endif
 }
 
 void RasterizerVulkan::FragmentBarrier() {

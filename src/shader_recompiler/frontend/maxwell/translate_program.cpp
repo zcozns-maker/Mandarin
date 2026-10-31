@@ -382,6 +382,12 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
                 }
                 program.output_vertices = GetOutputTopologyVertices(program.output_topology);
                 LowerGeometryPassthrough(program, normalized_host_info);
+                // Ported from PokeDinner (Franseven, PR 19, GPL-3.0): the passthrough is now
+                // ordinary geometry code, so the SPIR-V must not keep passthrough attributes or
+                // the passthrough flag ("Geometry shader passthrough used with no support";
+                // AMD's Windows driver crashed compiling such geometry shaders, Bananza's ground).
+                program.info.passthrough.mask.reset();
+                program.is_geometry_passthrough = false;
             }
         }
         break;

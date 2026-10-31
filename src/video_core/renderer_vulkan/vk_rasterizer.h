@@ -121,6 +121,7 @@ public:
     void FlushAndInvalidateRegion(
         DAddr addr, u64 size, VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void WaitForIdle() override;
+    void Nx2Membar() override;
     void FragmentBarrier() override;
     void TiledCacheBarrier() override;
     void FlushCommands() override;

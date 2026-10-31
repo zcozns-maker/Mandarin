@@ -402,6 +402,12 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
         const u32 index = method == BufferMethods::MemOpC ? 0 : 1;
         if (!VideoCommon::NativeDrawDiagnosticsEnabled() || samples[index]++ < 4)
             LOG_TRACE(HW_GPU, "Memory Operation {}: argument={:#x} (repeated diagnostic samples bounded)", index == 0 ? 'C' : 'D', method_call.argument);
+        // PokeDinner PR 19 (GPL-3.0): MEM_OP_D runs the operation MEM_OP_A/B/C prepared;
+        // operation 5 (bits 27-31) is MEMBAR.
+        if (method == BufferMethods::MemOpD && g_nx2_ampere.load(std::memory_order_relaxed) &&
+            ((method_call.argument >> 27) & 0x1f) == 5) {
+            OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->Nx2Membar(); });
+        }
         break;
     }
     case BufferMethods::SemaphoreAcquire: {
