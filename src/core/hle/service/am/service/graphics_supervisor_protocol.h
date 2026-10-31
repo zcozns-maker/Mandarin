@@ -224,7 +224,8 @@ constexpr std::optional<EventSupervisorBind> DecodeEventSupervisorBind(std::span
 }
 
 constexpr bool IsSupportedDisplaySession(u64 flags) {
-    return flags == 0x300020000ULL || flags == 0x300030000ULL ||
+    // 0x300010000: launch-era vi2 library (Mario Kart World 1.0, Donkey Kong Bananza 1.0).
+    return flags == 0x300010000ULL || flags == 0x300020000ULL || flags == 0x300030000ULL ||
            flags == 0x300040000ULL;
 }
 
@@ -237,9 +238,17 @@ constexpr u32 NativeGpuProfileForBootstrap(u64 flags) {
     }
 }
 
+// Local (non remote-memory) bootstrap. The low bits carry the SDK's bootstrap revision:
+// launch-era SDKs (Mario Kart World 1.0, Donkey Kong Bananza 1.0) send revision 1, later SDKs
+// send 5..7. Revisions 1..4 have no shader-profile override, so the characteristics keep their
+// size-derived default profile.
+inline bool IsKnownBootstrapRevision(u64 flags) {
+    const u64 revision = flags & ~0x8000000000000000ULL;
+    return (flags & 0x8000000000000000ULL) != 0 && revision >= 1 && revision <= 7;
+}
+
 inline bool IsLocalBootstrap(const BootstrapRequest& request) {
-    return (request.flags == 0x8000000000000005ULL ||
-            request.flags == 0x8000000000000006ULL || request.flags == 0x8000000000000007ULL) &&
+    return IsKnownBootstrapRevision(request.flags) &&
            std::ranges::all_of(request.parameters, [](u64 value) { return value == 0; });
 }
 

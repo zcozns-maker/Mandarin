@@ -16,6 +16,7 @@
 #endif
 #include <cstdio>
 
+#include "common/ns2_options.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -94,7 +95,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     // EDEN_NATIVE_STRICT stalls a channel on failed native work, which only the thread that
     // parses its commands can do.
-    static const bool strict = std::getenv("EDEN_NATIVE_STRICT") != nullptr;
+    const bool strict = Settings::NS2::NativeStrict();
     if (strict) {
         return;
     }

@@ -73,6 +73,9 @@ public:
 
     void LogMemoryStatistics() const;
 
+    /// Out-of-video-memory events reported by the allocator since the last call.
+    u32 TakeMemoryPressureEvents() const;
+
     /// True when ASTC is re-compressed to BC3 and opaque images may use BC1 instead.
     bool UseOpaqueAstcFormat() const;
 
@@ -574,6 +577,10 @@ private:
         bool drop_reduction;
         bool drop_custom_border;
         bool srgb_border;
+        /// Depth comparison set from what the shader does, not only the TSC: 0 = as the TSC,
+        /// 1 = off (plain sample through a comparison sampler), 2 = on (Dref sample through a
+        /// sampler whose TSC comparison bit is clear but that names a comparison function).
+        u8 compare_override;
         std::array<VkComponentSwizzle, 4> swizzle;
 
         bool operator==(const VariantKey&) const noexcept = default;
@@ -607,6 +614,8 @@ private:
     bool has_added_anisotropy{};
     bool has_linear_filtering{};
     bool has_depth_comparison{};
+    bool has_compare_function{}; ///< TSC names a comparison function other than Never
+    u32 tsc_compare_function{};
     bool has_minmax_reduction{};
     bool has_custom_border_colors{};
     bool has_srgb_border_color{};

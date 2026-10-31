@@ -20,6 +20,7 @@
 #include "core/hle/dlss_trace.h"
 #include "core/hle/guest_hooks.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/kernel/svc_results.h"
 
 namespace Kernel::Svc {
 
@@ -2611,10 +2612,22 @@ void Call(Core::System& system, u32 imm) {
     LOG_TRACE(Kernel_SVC, "{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",
         imm, GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2),
         GetArg64(args, 3), GetArg64(args, 4), GetArg64(args, 5), GetArg64(args, 6));
+    const std::array<uint64_t, 8> in_args = args;
     if (process.Is64Bit()) {
         Call64(system, imm, args);
     } else {
         Call32(system, imm, args);
+    }
+    // Eden-NS2: MKW and Kirby abort with guest result 0x4201 (kernel NotImplemented, 2001-0033).
+    // Name the SVC whenever one returns it (GetSystemTick, 0x1e, returns a tick in X0, skip it).
+    if (process.Is64Bit() && imm != 0x1e && static_cast<u32>(GetArg64(args, 0)) == ResultNotImplemented.raw) {
+        static std::atomic<u32> not_implemented_reports{};
+        if (not_implemented_reports.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_WARNING(Kernel_SVC,
+                        "SVC {:#x} returned NotImplemented (0x4201) on thread {}: args {:#x} {:#x} {:#x} {:#x}",
+                        imm, GetCurrentThread(kernel).GetThreadId(), in_args[0], in_args[1],
+                        in_args[2], in_args[3]);
+        }
     }
     //kernel.ExitSVCProfile();
     if (diag_slot != nullptr) {

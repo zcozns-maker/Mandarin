@@ -359,6 +359,27 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
             }
 
             if (!normalized_host_info.support_geometry_shader_passthrough) {
+                // Emulated passthrough: hardware passthrough re-emits the input primitive, so
+                // the output primitive follows the draw's topology, not the SPH output topology
+                // (which passthrough programs need not set: an unset one used to leave the SPIR-V
+                // without an output primitive mode, or emit more vertices than the input has).
+                switch (normalized_host_info.passthrough_input_vertices) {
+                case 1:
+                    program.output_topology = OutputTopology::PointList;
+                    break;
+                case 2:
+                    program.output_topology = OutputTopology::LineStrip;
+                    break;
+                case 3:
+                    program.output_topology = OutputTopology::TriangleStrip;
+                    break;
+                default:
+                    if (program.output_topology != OutputTopology::PointList &&
+                        program.output_topology != OutputTopology::LineStrip) {
+                        program.output_topology = OutputTopology::TriangleStrip;
+                    }
+                    break;
+                }
                 program.output_vertices = GetOutputTopologyVertices(program.output_topology);
                 LowerGeometryPassthrough(program, normalized_host_info);
             }

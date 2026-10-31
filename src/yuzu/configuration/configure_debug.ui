@@ -725,11 +725,25 @@
           </widget>
          </item>
          <item row="2" column="0">
-          <widget class="QCheckBox" name="flush_line">
-           <property name="text">
-            <string>Flush log output on each line</string>
-           </property>
-          </widget>
+          <layout class="QHBoxLayout" name="flush_line_layout">
+           <item>
+            <widget class="QCheckBox" name="flush_line">
+             <property name="text">
+              <string>Flush log output on each line</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QCheckBox" name="log_per_game">
+             <property name="toolTip">
+              <string>Also write each game's log to log/&lt;title id&gt;/eden_log.txt. The previous run of that game is kept as eden_log.old.txt.</string>
+             </property>
+             <property name="text">
+              <string>Separate log per game</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
          </item>
          <item row="3" column="0">
           <widget class="QCheckBox" name="fs_access_log">

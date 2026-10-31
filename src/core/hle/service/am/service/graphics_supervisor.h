@@ -110,6 +110,7 @@ private:
     bool m_video_encoder_initialized{};
     Phase m_phase{Phase::Created};
     u32 m_native_gpu_profile{};
+    u32 m_bootstrap_revision{};
     bool m_display_context_initialized{};
     bool m_gpu_context_initialized{};
     bool m_gpu_context_ready{};

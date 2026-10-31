@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include "common/ns2_options.h"
 #include "video_core/gpu_write_watch.h"
 #include "video_core/native_diagnostics.h"
 #include <algorithm>
@@ -345,6 +346,9 @@ void LogFrameDraw(const Tegra::Engines::Maxwell3D& maxwell3d, bool is_indexed, b
 }
 } // Anonymous namespace
 
+// Failed native draws by cause, for the periodic "failed draws so far" line.
+static std::array<std::atomic<u64>, 4> native_draw_failure_causes{};
+
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
 
@@ -355,12 +359,22 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     SCOPE_EXIT {
         auto& native = maxwell3d->GetNativeMacroEngine();
         if (native.native_turing && !submitted) {
-            native.native_execution_failed = true;
-            // Rate-limited: the first 32, then every 1024th with the running total.
+            // Skip just this draw. Flagging the native work failed made DrawManager skip every
+            // later draw in the command list as well (black frames from one bad shader);
+            // EDEN_NATIVE_STRICT restores that behaviour for debugging.
+            const bool strict = Settings::NS2::NativeStrict();
+            if (strict) {
+                native.native_execution_failed = true;
+            }
+            // Rate-limited: the first 32, then every 16384th with the running total.
             static std::atomic<u64> failed_draws{};
             const u64 count = ++failed_draws;
-            if (count <= 32 || count % 1024 == 0) {
-                LOG_ERROR(HW_GPU, "Native graphics draw failed; refusing submission completion (failed draws so far: {})", count);
+            if (count <= 32 || count % 16384 == 0) {
+                LOG_WARNING(HW_GPU,
+                          "Native graphics draw skipped (skipped draws so far: {}; "
+                          "no pipeline {}, configure failed {}, not built {}, descriptor exception {})",
+                          count, native_draw_failure_causes[0].load(), native_draw_failure_causes[1].load(),
+                          native_draw_failure_causes[2].load(), native_draw_failure_causes[3].load());
             }
         }
     };
@@ -371,7 +385,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         gpu_memory->FlushCaching();
     }
 
-    const auto report_failure = [&](std::string_view reason) {
+    const auto report_failure = [&](std::string_view reason, size_t cause) {
+        ++native_draw_failure_causes[cause];
         static std::set<std::tuple<u64, u64, std::string_view>> seen;
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
@@ -391,6 +406,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     if (!pipeline) {
         // A draw withheld for an asynchronous pipeline build is not a failure of the native work.
         submitted = pipeline_cache.TakeDeferredDraw();
+        if (!submitted && maxwell3d->GetNativeMacroEngine().native_turing) {
+            report_failure("no graphics pipeline (shader stage missing or rejected)", 0);
+        }
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -398,9 +416,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
     try {
-        if (!pipeline->Configure(is_indexed)) return;
+        if (!pipeline->Configure(is_indexed)) {
+            if (maxwell3d->GetNativeMacroEngine().native_turing) {
+                report_failure(pipeline->IsBuilt() ? "pipeline configure failed (build failed or descriptor memory)"
+                                                   : "pipeline configure failed (not built)",
+                               pipeline->IsBuilt() ? 1 : 2);
+            }
+            return;
+        }
     } catch (const Shader::Exception& exception) {
         LOG_ERROR(Render_Vulkan, "Graphics descriptor binding failed: {}", exception.what());
+        if (maxwell3d->GetNativeMacroEngine().native_turing) {
+            report_failure("descriptor binding exception", 3);
+        }
         return;
     }
 
@@ -1768,7 +1796,19 @@ bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
     if (image_id == VideoCommon::NULL_IMAGE_ID) {
         return false;
     }
-    const u32 buffer_size = static_cast<u32>(buffer_operand.pitch * buffer_operand.height);
+    const u64 full_buffer_size = u64{buffer_operand.pitch} * u64{buffer_operand.height};
+    if (full_buffer_size > 512ULL * 1024 * 1024) {
+        // Build 4 guard: a linear side this large is corrupt parameters, and caching it would
+        // allocate gigabytes of video memory (Pokopia's 4 GiB crash). Use the software DMA path.
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_ERROR(Render_Vulkan, "DMA {} with a {} byte linear buffer (pitch {}, height {}) left to software",
+                      IS_IMAGE_UPLOAD ? "upload" : "download", full_buffer_size, buffer_operand.pitch,
+                      buffer_operand.height);
+        }
+        return false;
+    }
+    const u32 buffer_size = static_cast<u32>(full_buffer_size);
     static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
     const auto post_op = IS_IMAGE_UPLOAD ? VideoCommon::ObtainBufferOperation::DoNothing
                                          : VideoCommon::ObtainBufferOperation::MarkAsWritten;

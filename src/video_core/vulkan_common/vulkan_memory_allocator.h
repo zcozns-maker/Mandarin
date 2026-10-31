@@ -137,8 +137,14 @@ namespace Vulkan {
             }
         }
 
+        /// Last-resort buffer allocation from the host-visible reserve pool (see the constructor).
+        VkResult CreateBufferFromReserve(const VkBufferCreateInfo &ci, MemoryUsage usage,
+                                         VkBuffer &handle, VmaAllocation &allocation,
+                                         VmaAllocationInfo &alloc_info) const;
+
         const Device &device;                              ///< Device handle.
         VmaAllocator allocator;                           ///< VMA allocator.
+        VmaPool reserve_pool{};                           ///< Pre-allocated host-visible memory for OOM.
         const VkPhysicalDeviceMemoryProperties properties; ///< Physical device memory properties.
         VkDeviceSize buffer_image_granularity;            ///< Adjacent buffer/image granularity
         u32 valid_memory_types{~0u};
@@ -146,5 +152,12 @@ namespace Vulkan {
 
     /// Logs VMA's blocks and allocations per memory type, and each heap's budget.
     void LogMemoryStatistics(const Device& device);
+
+    /// Records that an allocation ran out of video memory (the texture cache then frees images).
+    void NoteMemoryPressure() noexcept;
+    /// Returns the number of out-of-memory events since the last call, and resets it.
+    [[nodiscard]] u32 TakeMemoryPressureEvents() noexcept;
+    /// True once this session has run out of video memory at least once (sticky).
+    [[nodiscard]] bool HasHadMemoryPressure() noexcept;
 
 } // namespace Vulkan

@@ -118,6 +118,9 @@ protected:
     size_t native_source_size{};
     u32 native_source_header_size{};
     std::vector<Shader::Ampere::Instruction> native_trap_prefix;
+    // Vertex shader SPH input/output attribute addresses in ISBE line order (see LowerToMaxwell).
+    std::vector<u32> native_isbe_inputs;
+    std::vector<u32> native_isbe_outputs;
     // Set only when the program is translated by the native Ampere frontend.
     std::vector<Shader::Ampere::Instruction> ampere_program;
     std::vector<u32> ampere_indirect_targets; // BRX destinations, as instruction indices

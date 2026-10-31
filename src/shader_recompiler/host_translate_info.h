@@ -41,6 +41,9 @@ struct HostTranslateInfo {
                                         ///< control flow
     bool single_lane_geometry_subgroups{};
     bool support_buffer_texture_handles{};
+    /// Vertices per input primitive of the draw a geometry shader is built for (1, 2 or 3; 0 when
+    /// unknown). An emulated passthrough geometry shader re-emits exactly these vertices.
+    u32 passthrough_input_vertices{};
 
     void ApplyDescriptorLimitPolicy() noexcept {
         if (min_ssbo_alignment == 0) {

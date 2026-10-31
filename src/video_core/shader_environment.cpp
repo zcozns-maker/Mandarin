@@ -435,7 +435,7 @@ void GenericEnvironment::InitializeNativeCode(u32 source_header_size,
             if (logged.fetch_add(1) < 400) {
                 std::string values;
                 for (const u32 value : table.values) values += fmt::format(" {:#x}", value);
-                LOG_INFO(Shader,
+                LOG_DEBUG(Shader,
                          "native BRX at instruction {} (stage index {}): table words{}, base {:#x}, {} targets, capture {}{}",
                          table.branch, stage_index, values, tables.base, table.targets.size(), native.size(),
                          tables.extended ? " (extended)" : "");
@@ -538,7 +538,7 @@ void GenericEnvironment::InitializeNativeCode(u32 source_header_size,
                         native_program_key, reject_index * sizeof(Instruction), reject);
         }
     }
-    auto lowered = Shader::Ampere::LowerToMaxwell(native, verified_traps, true);
+    auto lowered = Shader::Ampere::LowerToMaxwell(native, verified_traps, true, native_isbe_inputs, native_isbe_outputs);
     if (!lowered) {
         dump_failure();
         if (const char* directory = std::getenv("EDEN_NATIVE_SHADER_OVERRIDE_DIR")) {
@@ -688,6 +688,19 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
         default:
             stage_index = program == Maxwell::ShaderType::Pixel ? 4 : 0;
             break;
+        }
+        if (program == Maxwell::ShaderType::VertexB) {
+            // SPH bytes 0x14..0x31 are the input map and 0x32..0x4f the output map, one bit per
+            // attribute word (bit i = attribute address i * 4).
+            const auto* const raw = reinterpret_cast<const u8*>(&sph);
+            const auto collect = [raw](u32 first_byte, std::vector<u32>& out) {
+                out.clear();
+                for (u32 bit = 0; bit < 30 * 8; ++bit) {
+                    if ((raw[first_byte + bit / 8] >> (bit % 8)) & 1) out.push_back(bit * 4);
+                }
+            };
+            collect(0x14, native_isbe_inputs);
+            collect(0x32, native_isbe_outputs);
         }
         InitializeNativeCode();
     }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <optional>
 #include <span>
@@ -240,7 +241,10 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     // Switch 2 ASTC textures decoded on the GPU keep at most 2048 texels a side: a 4K texture is
     // held from its next mip level on (a quarter of the video memory and decode work). The game's
     // own mips are used, so nothing is resampled. EDEN_NS2_FULL_TEXTURES=1 keeps them whole.
-    constexpr u32 MaxNativeSize = 2048;
+    // After video memory has run out once this session (Vulkan::HasHadMemoryPressure), newly
+    // created ones keep at most 1024 texels a side: a quarter of the memory again. Titles that
+    // fit (Pokopia, Bananza) never reach this.
+    const u32 MaxNativeSize = Vulkan::HasHadMemoryPressure() ? 1024U : 2048U;
     static const bool full_textures = std::getenv("EDEN_NS2_FULL_TEXTURES") != nullptr;
     if (info.native_tiling && !full_textures) {
         while (level_offset + 1 < levels &&
@@ -1957,6 +1961,10 @@ void TextureCacheRuntime::LogMemoryStatistics() const {
     Vulkan::LogMemoryStatistics(device);
 }
 
+u32 TextureCacheRuntime::TakeMemoryPressureEvents() const {
+    return Vulkan::TakeMemoryPressureEvents();
+}
+
 bool TextureCacheRuntime::UseOpaqueAstcFormat() const {
     // EDEN_NX2_ASTC_BC1=0 keeps every re-compressed ASTC image in BC3.
     static const bool enabled = [] {
@@ -3011,6 +3019,8 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
     has_linear_filtering = mag_filter == VK_FILTER_LINEAR || min_filter == VK_FILTER_LINEAR ||
                            mipmap_mode == VK_SAMPLER_MIPMAP_MODE_LINEAR;
     has_depth_comparison = tsc.depth_compare_enabled != 0;
+    tsc_compare_function = static_cast<u32>(tsc.depth_compare_func.Value());
+    has_compare_function = tsc_compare_function != 0;
     has_minmax_reduction = reduction_mode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT;
     has_srgb_border_color = tsc.srgb_conversion != 0 && srgb_border_color != border_color;
     if (has_minmax_reduction && !device.IsExtSamplerFilterMinmaxSupported()) {
@@ -3071,6 +3081,28 @@ Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth)
     key.drop_reduction = has_minmax_reduction && !image_view.SupportsMinmaxFilter();
     key.drop_custom_border = has_custom_border_colors && image_view.RequiresBorderColorFormat();
     key.srgb_border = has_srgb_border_color && IsPixelFormatSRGB(image_view.format);
+    // Vulkan requires the sampler's compareEnable to match the shader's use: a Dref sample
+    // (shadow map test) with comparison off, or a plain sample with it on, is undefined. AMD
+    // returns 0 for a Dref sample through a non-comparing sampler, i.e. "always in shadow".
+    if (has_depth_comparison && !is_depth) {
+        key.compare_override = 1;
+    } else if (!has_depth_comparison && is_depth && has_compare_function) {
+        key.compare_override = 2;
+    }
+    if (is_depth != has_depth_comparison) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 16) {
+            LOG_INFO(Render_Vulkan,
+                     "Sampler comparison mismatch: shader {} sample, TSC comparison {} (function "
+                     "{}), view format {} {} comparison; {}",
+                     is_depth ? "depth-compare" : "plain", has_depth_comparison ? "on" : "off",
+                     tsc_compare_function, static_cast<u32>(image_view.format),
+                     image_view.SupportsDepthComparison() ? "supports" : "does not support",
+                     key.compare_override == 1   ? "comparison turned off"
+                     : key.compare_override == 2 ? "comparison turned on"
+                                                 : "left as is");
+        }
+    }
     if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
         const VkComponentMapping& mapping = image_view.Swizzle();
         key.swizzle = {mapping.r, mapping.g, mapping.b, mapping.a};
@@ -3147,6 +3179,11 @@ VkSampler Sampler::Emplace(VariantKey key) {
     }
     if (!custom_border) {
         create_info.borderColor = ConvertBorderColor(color);
+    }
+    if (key.compare_override == 1) {
+        create_info.compareEnable = VK_FALSE;
+    } else if (key.compare_override == 2) {
+        create_info.compareEnable = VK_TRUE;
     }
     variants.push_back(Variant{
         .key = key,

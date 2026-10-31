@@ -8,6 +8,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdlib>
+#include <mutex>
 #include <regex>
 #include <thread>
 
@@ -239,9 +240,13 @@ struct ColorConsoleBackend final : public Backend {
 #ifndef __OPENORBIS__
 /// @brief Backend that writes to a file passed into the constructor
 struct FileBackend final : public Backend {
-    explicit FileBackend(const std::filesystem::path filename) noexcept {
-        auto old_filename = filename;
-        old_filename += ".old.txt";
+    explicit FileBackend(const std::filesystem::path filename) noexcept
+        : FileBackend(filename, [&] {
+              auto old = filename;
+              old += ".old.txt";
+              return old;
+          }()) {}
+    FileBackend(const std::filesystem::path filename, const std::filesystem::path old_filename) noexcept {
         // Existence checks are done within the functions themselves.
         // We don't particularly care if these succeed or not.
         void(FS::RemoveFile(old_filename));
@@ -282,12 +287,17 @@ struct FileBackend final : public Backend {
         // Prevent logs from exceeding a set maximum size in the event that log entries are spammed.
         const auto write_limit = Settings::values.extended_logging.GetValue() ? 1_GiB : 100_MiB;
         const bool write_limit_exceeded = bytes_written > write_limit;
-        if (entry.log_level >= Level::Error || write_limit_exceeded) {
+        // Warnings and worse are flushed at once, and everything else at least every 200 ms,
+        // so a crash (which never runs the destructor) cannot cut off the lines leading to it.
+        const auto now = std::chrono::steady_clock::now();
+        if (entry.log_level >= Level::Warning || write_limit_exceeded ||
+            now - last_flush > std::chrono::milliseconds(200)) {
             // Stop writing after the write limit is exceeded.
             // Don't close the file so we can print a stacktrace if necessary
             if (write_limit_exceeded)
                 enabled = false;
             file->Flush();
+            last_flush = now;
         }
     }
 
@@ -297,6 +307,7 @@ struct FileBackend final : public Backend {
 private:
     std::optional<FS::IOFile> file;
     std::size_t bytes_written = 0;
+    std::chrono::steady_clock::time_point last_flush{std::chrono::steady_clock::now()};
     bool enabled = true;
 };
 #endif
@@ -346,6 +357,11 @@ struct Impl {
 #ifndef __OPENORBIS__
         if (file_backend)
             lambda(static_cast<Backend&>(*file_backend));
+        if (has_game_backend.load(std::memory_order_acquire)) {
+            std::scoped_lock lock{game_backend_mutex};
+            if (game_backend)
+                lambda(static_cast<Backend&>(*game_backend));
+        }
 #endif
 #ifdef _WIN32
         lambda(static_cast<Backend&>(debugger_backend));
@@ -359,6 +375,10 @@ struct Impl {
     ColorConsoleBackend color_console_backend{};
 #ifndef __OPENORBIS__
     std::optional<FileBackend> file_backend;
+    // Recursive: writing or flushing a file may itself log an error.
+    std::recursive_mutex game_backend_mutex;
+    std::optional<FileBackend> game_backend;
+    std::atomic_bool has_game_backend{false};
 #endif
 #ifdef _WIN32
     DebuggerBackend debugger_backend{};
@@ -421,6 +441,41 @@ void SetGlobalFilter(const Filter& filter) {
 void SetColorConsoleBackendEnabled(bool enabled) {
     if (logging_instance)
         logging_instance->color_console_backend.enabled = enabled;
+}
+
+void StartGameLog(std::uint64_t title_id) {
+#ifndef __OPENORBIS__
+    if (!logging_instance)
+        return;
+    StopGameLog();
+    if (!Settings::values.log_per_game.GetValue())
+        return;
+    using namespace Common::FS;
+    const auto game_dir = GetEdenPath(EdenPath::LogDir) / fmt::format("{:016x}", title_id);
+    void(CreateDirs(game_dir));
+    {
+        std::scoped_lock lock{logging_instance->game_backend_mutex};
+        logging_instance->game_backend.emplace(game_dir / "eden_log.txt",
+                                               game_dir / "eden_log.old.txt");
+    }
+    logging_instance->has_game_backend.store(true, std::memory_order_release);
+    LOG_INFO(Log, "Per-game log for {:016X} started", title_id);
+#else
+    (void)title_id;
+#endif
+}
+
+void StopGameLog() {
+#ifndef __OPENORBIS__
+    if (!logging_instance)
+        return;
+    std::scoped_lock lock{logging_instance->game_backend_mutex};
+    if (logging_instance->game_backend) {
+        logging_instance->game_backend->Flush();
+        logging_instance->game_backend.reset();
+    }
+    logging_instance->has_game_backend.store(false, std::memory_order_release);
+#endif
 }
 
 void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::string_view format, const fmt::format_args& args) {

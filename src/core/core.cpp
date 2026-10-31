@@ -56,6 +56,7 @@
 #include "core/internal_network/network.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
+#include "core/ns2_hang_watchdog.h"
 #include "core/memory/cheat_engine.h"
 #include "core/perf_stats.h"
 #include "core/reporter.h"
@@ -355,6 +356,7 @@ struct System::Impl {
             LOG_ERROR(Core, "Failed to read title for ROM!");
         }
 
+        Common::Log::StartGameLog(params.program_id);
         LOG_INFO(Core, "Loading {} ({:016X}) ...", name, params.program_id);
 
         // Expose program id to dump sites and other global readers.
@@ -408,6 +410,7 @@ struct System::Impl {
         }
 
         GameSettings::LoadOverrides(program_id, gpu_core->Renderer());
+        hang_watchdog = NS2::HangWatchdog::Create(system);
         if (auto room_member = Network::GetRoomMember().lock()) {
             Network::GameInfo game_info;
             game_info.name = name;
@@ -420,6 +423,7 @@ struct System::Impl {
 
     void ShutdownMainProcess() {
         SetShuttingDown(true);
+        hang_watchdog.reset();
         Common::ADPF::Shutdown();
 
         // Reset per-game flags
@@ -462,6 +466,7 @@ struct System::Impl {
         arp_manager.ResetAll();
 
         LOG_DEBUG(Core, "Shutdown OK");
+        Common::Log::StopGameLog();
     }
 
     bool IsShuttingDown() const {
@@ -535,6 +540,7 @@ struct System::Impl {
     /// AppLoader used to load the current executing application
     std::unique_ptr<Loader::AppLoader> app_loader;
     std::stop_source stop_event;
+    std::unique_ptr<NS2::HangWatchdog> hang_watchdog;
 
     mutable std::mutex suspend_guard;
     std::mutex general_channel_mutex;

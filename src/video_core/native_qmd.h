@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include "common/ns2_options.h"
 #include <cstdlib>
 #include <array>
 #include <cstdint>
@@ -39,7 +40,7 @@ public:
         struct Pending { Address address; Word action; Word count; };
         // Outside EDEN_NATIVE_STRICT, a dispatch the backend cannot run is skipped but still
         // completes, so its semaphore releases and dependent QMDs do not leave the game waiting.
-        static const bool strict = std::getenv("EDEN_NATIVE_STRICT") != nullptr;
+        const bool strict = Settings::NS2::NativeStrict();
         bool dispatch_skipped = false;
         std::array<Pending, 256> pending{};
         std::size_t count = 1;

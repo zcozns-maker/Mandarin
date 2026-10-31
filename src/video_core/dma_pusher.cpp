@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdlib>
 
+#include "common/ns2_options.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -78,7 +79,7 @@ bool DmaPusher::CheckFailedNativeWork() const {
     }
     // EDEN_NATIVE_STRICT keeps the channel stalled for debugging; otherwise drop the failed work
     // (a skipped draw or dispatch) and keep the game running instead of hanging on its fences.
-    static const bool strict = std::getenv("EDEN_NATIVE_STRICT") != nullptr;
+    const bool strict = Settings::NS2::NativeStrict();
     if (strict) {
         return true;
     }

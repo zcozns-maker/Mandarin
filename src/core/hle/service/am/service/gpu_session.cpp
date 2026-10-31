@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <vector>
 #include "common/swap.h"
 #include "common/alignment.h"
@@ -16,6 +17,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/am/service/graphics_session.h"
+#include "core/hle/service/am/service/nx2_tipc_handshake.h"
 #include "core/hle/service/am/service/gpu_session.h"
 #include "core/hle/service/am/service/gpu_memory_registration.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -95,6 +97,9 @@ public:
             return ServiceFrameworkBase::HandleSyncRequest(session, ctx);
         }
         const auto guard = LockService();
+        if (TryTipcEchoHandshake(ctx, "gpu session")) {
+            return system.IsPoweredOn() ? ctx.WriteToOutgoingCommandBuffer() : ResultSuccess;
+        }
         InvokeRequestTipc(ctx);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(Kernel::ResultNotImplemented.raw);
@@ -149,9 +154,11 @@ private:
             m_devices->events[packet[17]]) {
             result = MapMemory(packet, selected_kind);
             m_devices->events[packet[17]]->Signal(kernel);
-            LOG_DEBUG(Service_AM, "GPU map4K as={}, memory={}, VA={:#x}..{:#x}, permission={}, cache={}, kinds={:#x}/{:#x}, mode={}, sync={}, notification={}, selected={:#x}, result={:#x}",
+            if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU map4K as={}, memory={}, VA={:#x}..{:#x}, permission={}, cache={}, kinds={:#x}/{:#x}, mode={}, sync={}, notification={}, selected={:#x}, result={:#x}",
                       packet[2], packet[7], ReadPair(packet, 3), ReadPair(packet, 5), packet[10],
-                      packet[11], packet[12], packet[13], packet[14], packet[16], packet[17], selected_kind, result.raw);
+                      packet[11], packet[12], packet[13], packet[14], packet[16], packet[17], selected_kind, result.raw); } else { LOG_DEBUG(Service_AM, "GPU map4K as={}, memory={}, VA={:#x}..{:#x}, permission={}, cache={}, kinds={:#x}/{:#x}, mode={}, sync={}, notification={}, selected={:#x}, result={:#x}",
+                      packet[2], packet[7], ReadPair(packet, 3), ReadPair(packet, 5), packet[10],
+                      packet[11], packet[12], packet[13], packet[14], packet[16], packet[17], selected_kind, result.raw); }
         }
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(result.raw);
@@ -184,8 +191,9 @@ private:
             }
             m_devices->events[packet[10]]->Signal(kernel);
         }
-        LOG_DEBUG(Service_AM, "GPU modify4K as={}, VA={:#x}..{:#x}, kinds={:#x}/{:#x}, sync={}, notification={}, selected={}, result={:#x}",
-                  packet[2], begin, end, requested, fallback, packet[9], packet[10], selected, result.raw);
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU modify4K as={}, VA={:#x}..{:#x}, kinds={:#x}/{:#x}, sync={}, notification={}, selected={}, result={:#x}",
+                  packet[2], begin, end, requested, fallback, packet[9], packet[10], selected, result.raw); } else { LOG_DEBUG(Service_AM, "GPU modify4K as={}, VA={:#x}..{:#x}, kinds={:#x}/{:#x}, sync={}, notification={}, selected={}, result={:#x}",
+                  packet[2], begin, end, requested, fallback, packet[9], packet[10], selected, result.raw); }
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(result.raw);
         rb.Push<u32>(selected);
@@ -213,8 +221,9 @@ private:
                 }
             }
             m_devices->events[packet[8]]->Signal(kernel);
-            LOG_DEBUG(Service_AM, "GPU unmap4K as={}, VA={:#x}..{:#x}, bytes={:#x}, result={:#x}",
-                      packet[2], begin, end, unmapped, result.raw);
+            if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU unmap4K as={}, VA={:#x}..{:#x}, bytes={:#x}, result={:#x}",
+                      packet[2], begin, end, unmapped, result.raw); } else { LOG_DEBUG(Service_AM, "GPU unmap4K as={}, VA={:#x}..{:#x}, bytes={:#x}, result={:#x}",
+                      packet[2], begin, end, unmapped, result.raw); }
         }
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(result.raw);
@@ -243,8 +252,9 @@ private:
                 }
             }
             m_devices->events[packet[8]]->Signal(kernel);
-            LOG_DEBUG(Service_AM, "GPU sparse region destroy as={}, VA={:#x}..{:#x}, result={:#x}",
-                      packet[2], begin, end, result.raw);
+            if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU sparse region destroy as={}, VA={:#x}..{:#x}, result={:#x}",
+                      packet[2], begin, end, result.raw); } else { LOG_DEBUG(Service_AM, "GPU sparse region destroy as={}, VA={:#x}..{:#x}, result={:#x}",
+                      packet[2], begin, end, result.raw); }
         }
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result.raw);
@@ -275,10 +285,13 @@ private:
             m_devices->events[request->notification]->Signal(kernel);
         }
         if (request) {
-            LOG_DEBUG(Service_AM, "GPU sparse region as={}, VA={:#x}..{:#x}, page_shift={}, mode={}, device={}, sync={}, notification={}, result={:#x}",
+            if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU sparse region as={}, VA={:#x}..{:#x}, page_shift={}, mode={}, device={}, sync={}, notification={}, result={:#x}",
                       request->address_space, request->begin, request->end, request->page_shift,
                       request->allocation_mode, request->device, request->sync,
-                      request->notification, result.raw);
+                      request->notification, result.raw); } else { LOG_DEBUG(Service_AM, "GPU sparse region as={}, VA={:#x}..{:#x}, page_shift={}, mode={}, device={}, sync={}, notification={}, result={:#x}",
+                      request->address_space, request->begin, request->end, request->page_shift,
+                      request->allocation_mode, request->device, request->sync,
+                      request->notification, result.raw); }
         }
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result.raw);
@@ -329,8 +342,9 @@ private:
         if (packet[14] < m_devices->events.size() && m_devices->events[packet[14]]) {
             m_devices->events[packet[14]]->Signal(kernel);
         }
-        LOG_DEBUG(Service_AM, "GPU sparse map as={}, count={}, processed={}, result={:#x}",
-                  packet[10], ReadPair(packet, 8), processed, result.raw);
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU sparse map as={}, count={}, processed={}, result={:#x}",
+                  packet[10], ReadPair(packet, 8), processed, result.raw); } else { LOG_DEBUG(Service_AM, "GPU sparse map as={}, count={}, processed={}, result={:#x}",
+                  packet[10], ReadPair(packet, 8), processed, result.raw); }
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(result.raw);
         rb.Push(processed);
@@ -462,8 +476,9 @@ private:
         const auto* packet = ctx.CommandBuffer();
         const auto result = packet[0] == 0x76 && packet[1] == 2
             ? ReleaseMemory(packet[2], packet[3]) : Kernel::ResultInvalidCombination;
-        LOG_DEBUG(Service_AM, "GPU memory release id={}, notification={}, result={:#x}",
-                  packet[2], packet[3], result.raw);
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU memory release id={}, notification={}, result={:#x}",
+                  packet[2], packet[3], result.raw); } else { LOG_DEBUG(Service_AM, "GPU memory release id={}, notification={}, result={:#x}",
+                  packet[2], packet[3], result.raw); }
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result.raw);
     }
@@ -473,8 +488,9 @@ private:
         Result result = Kernel::ResultInvalidCombination;
         if (const auto request = DecodeGpuMemoryRegistration(std::span<const u32>{packet, 8})) {
             result = RegisterMemory(request->begin, request->end, request->flags, request->device, id);
-            LOG_DEBUG(Service_AM, "GPU memory {:#x}..{:#x}, device={}, raw_device={:#x}, flags={}, id={}, result={:#x}",
-                      request->begin, request->end, request->device, packet[7], request->flags, id, result.raw);
+            if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU memory {:#x}..{:#x}, device={}, raw_device={:#x}, flags={}, id={}, result={:#x}",
+                      request->begin, request->end, request->device, packet[7], request->flags, id, result.raw); } else { LOG_DEBUG(Service_AM, "GPU memory {:#x}..{:#x}, device={}, raw_device={:#x}, flags={}, id={}, result={:#x}",
+                      request->begin, request->end, request->device, packet[7], request->flags, id, result.raw); }
         }
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(result.raw);
@@ -506,6 +522,7 @@ IGpuSession::IGpuSession(Core::System& system, std::shared_ptr<Nvidia::Module> m
         {33, &IGpuSession::CreateAddressSpace, "CreateAddressSpace"},
         {41, &IGpuSession::CreateGraphicsDevice, "CreateGraphicsDevice"},
         {42, &IGpuSession::DestroyGraphicsDevice, "DestroyGraphicsDevice"},
+        {201, &IGpuSession::GetAddressSpacePartition, "GetUserPartitionLegacy"},
         {202, &IGpuSession::GetAddressSpacePartition, "GetGsvPartition"},
         {203, &IGpuSession::GetAddressSpacePartition, "GetUserPartition"},
     };
@@ -519,9 +536,25 @@ IGpuSession::~IGpuSession() {
 
 Result IGpuSession::HandleSyncRequest(Kernel::KServerSession& session, HLERequestContext& ctx) {
     if (!ctx.IsTipc() || handlers_tipc.contains(ctx.GetCommand())) {
-        return ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+        const bool tipc = ctx.IsTipc();
+        const u32 command = tipc ? ctx.GetCommand() : 0;
+        const Result dispatch = ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+        if (tipc) {
+            if (const u32 reply = TipcReplyResult(ctx.CommandBuffer()); reply != 0) {
+                static std::mutex logged_mutex;
+                static std::set<u64> logged;
+                const std::scoped_lock lock{logged_mutex};
+                if (logged.insert((u64{command} << 32) | reply).second) {
+                    LOG_WARNING(Service_AM, "gpu session command {} failed with result {:#x}", command, reply);
+                }
+            }
+        }
+        return dispatch;
     }
     const auto guard = LockService();
+    if (TryTipcEchoHandshake(ctx, "gpu session")) {
+        return system.IsPoweredOn() ? ctx.WriteToOutgoingCommandBuffer() : ResultSuccess;
+    }
     InvokeRequestTipc(ctx);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(Kernel::ResultNotImplemented.raw);
@@ -556,7 +589,10 @@ void IGpuSession::GetAddressSpacePartition(HLERequestContext& ctx) {
     const auto* packet = ctx.CommandBuffer();
     Result result = Kernel::ResultInvalidCombination;
     std::array<u64, 9> values{};
-    const bool user = ctx.GetCommand() == 203;
+    // Launch-era SDKs (Mario Kart World 1.0, Donkey Kong Bananza 1.0) ask 201 for the user
+    // partition and expect the 202-style reply: result, then the inclusive first/last address.
+    const bool legacy_user = ctx.GetCommand() == 201;
+    const bool user = ctx.GetCommand() == 203 || legacy_user;
     if (!user) {
         values[0] = ~u64{0}; // No supervisor-owned partition is reserved by this adapter.
     }
@@ -583,9 +619,18 @@ void IGpuSession::GetAddressSpacePartition(HLERequestContext& ctx) {
                 result = Kernel::ResultInvalidState;
             }
         }
-        LOG_DEBUG(Service_AM, "GPU partition command={}, id={}, begin={:#x}, end={:#x}, result={:#x}",
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU partition command={}, id={}, begin={:#x}, end={:#x}, result={:#x}",
                   ctx.GetCommand(), id, user ? values[1] : values[0],
-                  user ? values[2] : values[1], result.raw);
+                  user ? values[2] : values[1], result.raw); } else { LOG_DEBUG(Service_AM, "GPU partition command={}, id={}, begin={:#x}, end={:#x}, result={:#x}",
+                  ctx.GetCommand(), id, user ? values[1] : values[0],
+                  user ? values[2] : values[1], result.raw); }
+    }
+    if (legacy_user) {
+        IPC::ResponseBuilder rb{ctx, 6};
+        rb.Push(result.raw);
+        rb.Push(values[1]);
+        rb.Push(values[2]);
+        return;
     }
     IPC::ResponseBuilder rb{ctx, user ? 20U : 6U};
     rb.Push(result.raw);
@@ -631,7 +676,7 @@ void IGpuSession::CreateAddressSpace(HLERequestContext& ctx) {
             break;
         }
     }
-    LOG_DEBUG(Service_AM, "GPU address space id={}, result={:#x}", id, result.raw);
+    if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU address space id={}, result={:#x}", id, result.raw); } else { LOG_DEBUG(Service_AM, "GPU address space id={}, result={:#x}", id, result.raw); }
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(result.raw);
     rb.Push(id);
@@ -657,8 +702,9 @@ void IGpuSession::CreateGraphicsDevice(HLERequestContext& ctx) {
                 }
             }
         }
-        LOG_DEBUG(Service_AM, "graphics device name={:#x}, flags={:#x}, id={}, result={:#x}",
-                  name, flags, id, result.raw);
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "graphics device name={:#x}, flags={:#x}, id={}, result={:#x}",
+                  name, flags, id, result.raw); } else { LOG_DEBUG(Service_AM, "graphics device name={:#x}, flags={:#x}, id={}, result={:#x}",
+                  name, flags, id, result.raw); }
     }
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(result.raw);
@@ -702,7 +748,7 @@ void IGpuSession::GetNotificationEvent(HLERequestContext& ctx) {
             readable->Open(kernel);
             result = ResultSuccess;
         } else { result = Kernel::ResultOutOfResource; }
-        LOG_DEBUG(Service_AM, "GPU notification event index={}, result={:#x}", index, result.raw);
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU notification event index={}, result={:#x}", index, result.raw); } else { LOG_DEBUG(Service_AM, "GPU notification event index={}, result={:#x}", index, result.raw); }
     }
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(result.raw);
@@ -725,7 +771,7 @@ void IGpuSession::RequestWorker(HLERequestContext& ctx) {
             }
             if (result.IsSuccess()) { m_devices->events[index]->Signal(kernel); }
         }
-        LOG_DEBUG(Service_AM, "GPU worker request index={}, result={:#x}", index, result.raw);
+        if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU worker request index={}, result={:#x}", index, result.raw); } else { LOG_DEBUG(Service_AM, "GPU worker request index={}, result={:#x}", index, result.raw); }
     }
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(result.raw);
@@ -745,6 +791,6 @@ void IGpuSession::AcquireWorker(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(result.raw);
     ctx.AddMoveObject(client);
-    LOG_DEBUG(Service_AM, "GPU worker acquisition result={:#x}", result.raw);
+    if (result == Kernel::ResultNotImplemented) { LOG_WARNING(Service_AM, "GPU worker acquisition result={:#x}", result.raw); } else { LOG_DEBUG(Service_AM, "GPU worker acquisition result={:#x}", result.raw); }
 }
 } // namespace Service::AM

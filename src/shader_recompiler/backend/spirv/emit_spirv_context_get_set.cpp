@@ -23,8 +23,15 @@ Id AttrPointer(EmitContext& ctx, Id pointer_type, Id vertex, Id base, Args&&... 
     switch (ctx.stage) {
     case Stage::TessellationControl:
     case Stage::TessellationEval:
-    case Stage::Geometry:
         return ctx.OpAccessChain(pointer_type, base, vertex, std::forward<Args>(args)...);
+    case Stage::Geometry: {
+        // Geometry inputs are arrays of the input primitive's vertex count: keep the vertex
+        // index inside it (an out-of-bounds index is undefined, and an emulated passthrough
+        // shader could read vertices the primitive does not have).
+        const u32 last = InputTopologyVertices::vertices(ctx.runtime_info.input_topology) - 1;
+        const Id clamped{ctx.OpUMin(ctx.U32[1], vertex, ctx.Const(last))};
+        return ctx.OpAccessChain(pointer_type, base, clamped, std::forward<Args>(args)...);
+    }
     default:
         return ctx.OpAccessChain(pointer_type, base, std::forward<Args>(args)...);
     }

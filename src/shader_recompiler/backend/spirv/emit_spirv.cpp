@@ -295,6 +295,13 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
         case OutputTopology::TriangleStrip:
             ctx.AddExecutionMode(main, spv::ExecutionMode::OutputTriangleStrip);
             break;
+        default:
+            // A geometry shader must declare exactly one output primitive; an unknown SPH value
+            // used to leave none (invalid SPIR-V that drivers may crash compiling).
+            LOG_WARNING(Shader_SPIRV, "Unknown geometry output topology {}, using triangle strip",
+                        static_cast<u32>(program.output_topology));
+            ctx.AddExecutionMode(main, spv::ExecutionMode::OutputTriangleStrip);
+            break;
         }
         if (program.info.stores[IR::Attribute::PointSize]) {
             ctx.AddCapability(spv::Capability::GeometryPointSize);

@@ -583,6 +583,51 @@ struct Values {
     SwitchableSetting<bool> use_disk_shader_cache{linkage, true, "use_disk_shader_cache",
                                                   Category::RendererAdvanced};
 
+    // Switch 2 / Eden-NS2 per-game options. All default to the safe/off behaviour globally and
+    // can be turned on per game (Properties -> Graphics -> Advanced, or the game's custom ini).
+    // The matching environment variables still win when set, for debugging:
+    //   EDEN_NATIVE_LOWER_ENABLE=<group,...> replaces all ns2_lower_* options,
+    //   EDEN_NS2_FENCE_TIMEOUT_MS, EDEN_NATIVE_STRICT, EDEN_NS2_NO_PIPELINE_GUARD.
+    SwitchableSetting<bool> ns2_lower_isbe_attr{linkage, false, "ns2_lower_isbe_attr",
+                                                Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_warpsync_relaxed{linkage, false, "ns2_lower_warpsync_relaxed",
+                                                       Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_surface_atomic{linkage, false, "ns2_lower_surface_atomic",
+                                                     Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_surface_dims{linkage, false, "ns2_lower_surface_dims",
+                                                   Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_local_vector_spill{
+        linkage, false, "ns2_lower_local_vector_spill", Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_uniform_vote{linkage, false, "ns2_lower_uniform_vote",
+                                                   Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_isbewr_drop{linkage, false, "ns2_lower_isbewr_drop",
+                                                  Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_audit_fsel{linkage, false, "ns2_lower_audit_fsel",
+                                                 Category::RendererAdvanced};
+    SwitchableSetting<u32, true> ns2_fence_timeout_ms{linkage,
+                                                      0,
+                                                      0,
+                                                      5000,
+                                                      "ns2_fence_timeout_ms",
+                                                      Category::RendererAdvanced,
+                                                      Specialization::Countable,
+                                                      true,
+                                                      true};
+    SwitchableSetting<bool> ns2_native_strict{linkage, false, "ns2_native_strict",
+                                              Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_pipeline_guard{linkage, true, "ns2_pipeline_guard",
+                                               Category::RendererAdvanced};
+    // Diagnostic: dump guest threads after this many seconds without a presented frame (0 = off).
+    SwitchableSetting<u32, true> ns2_hang_dump_seconds{linkage,
+                                                       0,
+                                                       0,
+                                                       600,
+                                                       "ns2_hang_dump_seconds",
+                                                       Category::RendererAdvanced,
+                                                       Specialization::Countable,
+                                                       true,
+                                                       true};
+
     SwitchableSetting<bool> use_vulkan_driver_pipeline_cache{
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
@@ -923,6 +968,8 @@ struct Values {
     // Miscellaneous
     Setting<std::string> log_filter{linkage, "*:Info", "log_filter", Category::Miscellaneous};
     Setting<bool> log_flush_line{linkage, false, "flush_line", Category::Miscellaneous, Specialization::Default, true, true};
+    // Also write each game's log to log/<title id>/eden_log.txt (previous run: eden_log.old.txt)
+    Setting<bool> log_per_game{linkage, false, "log_per_game", Category::Miscellaneous};
     Setting<bool> censor_username{linkage, true, "censor_username", Category::Miscellaneous};
     Setting<bool> first_launch{linkage, true, "first_launch", Category::Miscellaneous};
 

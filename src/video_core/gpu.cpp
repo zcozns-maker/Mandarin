@@ -63,7 +63,13 @@ struct GPU::Impl {
         , is_async{is_async_}
     {}
 
-    ~Impl() = default;
+    ~Impl() {
+        // Members are destroyed in reverse order, so `channels` (declared after `renderer`) used to
+        // die first. The renderer's teardown still submits work, and Scheduler::SubmitExecution ->
+        // StateTracker::InvalidateCommandBufferState then wrote into the freed channel's Maxwell3D
+        // dirty flags (eden.exe 0xc0000005 at shutdown). Tear the renderer down while channels live.
+        renderer.reset();
+    }
 
     std::shared_ptr<Control::ChannelState> CreateChannel(s32 channel_id) {
         auto channel_state = std::make_shared<Tegra::Control::ChannelState>(channel_id);

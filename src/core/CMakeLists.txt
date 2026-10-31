@@ -17,6 +17,8 @@ add_library(core STATIC
     constants.h
     core.cpp
     core.h
+    ns2_hang_watchdog.cpp
+    ns2_hang_watchdog.h
     game_settings.cpp
     game_settings.h
     core_timing.cpp

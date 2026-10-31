@@ -6,10 +6,12 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
+#include "common/ns2_options.h"
 #include "common/assert.h"
 #include "common/cityhash.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
@@ -80,8 +82,17 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
         }
         const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
         if (!shader_info) {
-            if (native) {
-                ThrowIfRejected(*cpu_shader_addr, shader_addr);
+            if (native && IsRejected(*cpu_shader_addr, shader_addr)) {
+                // Known-untranslatable shader (e.g. Mario Kart World's stage-buffer reads): skip
+                // the draw without throwing; exceptions for 100k+ draws were a stutter source.
+                last_shaders_valid = false;
+                static std::atomic<u64> skipped_rejected{};
+                const u64 count = ++skipped_rejected;
+                if (count == 1 || count % 16384 == 0) {
+                    LOG_WARNING(HW_GPU, "Skipping draws with previously rejected native shaders "
+                                        "(skipped so far: {})", count);
+                }
+                return false;
             }
             const u32 start_address{native ? 0 : shader_config.offset};
             try {
@@ -102,7 +113,13 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
 } catch (const Shader::Exception& error) {
     auto& native = maxwell3d->GetNativeMacroEngine();
     if (!native.native_turing) throw;
-    native.native_execution_failed = true;
+    // Only this draw is skipped (the rasterizer reports it). Marking the native work failed here
+    // made DrawManager drop every later draw of the command list too, which is how one
+    // untranslatable shader turned whole frames black. EDEN_NATIVE_STRICT keeps the old stall.
+    const bool strict = Settings::NS2::NativeStrict();
+    if (strict) {
+        native.native_execution_failed = true;
+    }
     last_shaders_valid = false;
     // Rate-limited: the first 32, then every 1024th with the running total.
     static std::atomic<u64> rejected_native_shaders{};
@@ -201,6 +218,20 @@ void ShaderCache::ThrowIfRejected(VAddr cpu_addr, GPUVAddr gpu_addr) {
         }
     }
     throw Shader::RuntimeError("{}", error);
+}
+
+bool ShaderCache::IsRejected(VAddr cpu_addr, GPUVAddr gpu_addr) {
+    std::scoped_lock lock{lookup_mutex};
+    const auto it = rejected_shaders.find(cpu_addr);
+    if (it == rejected_shaders.end()) {
+        return false;
+    }
+    const size_t size = MappedPrefix(*gpu_memory, gpu_addr);
+    if (size == it->second.prefix_size && PrefixHash(*gpu_memory, gpu_addr, size) == it->second.prefix_hash) {
+        return true;
+    }
+    rejected_shaders.erase(it);
+    return false;
 }
 
 void ShaderCache::DropRejections(VAddr addr, size_t size) {

@@ -41,6 +41,7 @@ void ConfigureDebug::SetConfiguration() {
     ui->gdbport_spinbox->setValue(Settings::values.gdbstub_port.GetValue());
     ui->log_filter_edit->setText(QString::fromStdString(Settings::values.log_filter.GetValue()));
     ui->flush_line->setChecked(Settings::values.log_flush_line.GetValue());
+    ui->log_per_game->setChecked(Settings::values.log_per_game.GetValue());
     ui->censor_username->setChecked(Settings::values.censor_username.GetValue());
     ui->reporting_services->setChecked(Settings::values.reporting_services.GetValue());
     ui->dump_audio_commands->setChecked(Settings::values.dump_audio_commands.GetValue());
@@ -114,6 +115,7 @@ void ConfigureDebug::ApplyConfiguration() {
     UISettings::values.show_console = ui->toggle_console->isChecked();
     Settings::values.log_filter = ui->log_filter_edit->text().toStdString();
     Settings::values.log_flush_line = ui->flush_line->isChecked();
+    Settings::values.log_per_game = ui->log_per_game->isChecked();
     Settings::values.censor_username = ui->censor_username->isChecked();
     Settings::values.program_args = ui->homebrew_args_edit->text().toStdString();
     Settings::values.enable_fs_access_log = ui->fs_access_log->isChecked();

@@ -66,6 +66,7 @@ private:
     std::string name;
     std::optional<FileSys::NACP> control; ///< control.nacp next to or above the dump, if any
     std::string romfs_version;            ///< "1.8.0" from the RomFS's Product.180 tables, if any
+    std::string sidecar_version;          ///< "version=" from a game.ini sidecar, if any
     u64 title_id{};
     bool override_update;
     bool standalone{true};

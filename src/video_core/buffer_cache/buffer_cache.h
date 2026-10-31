@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -254,11 +255,28 @@ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     }
 }
 
+// Build 4: requests above this many bytes are treated as corrupt (largest real buffers seen are
+// about 100 MiB) and logged; DMA copies and clears this large fall back to the software path.
+inline constexpr u64 HUGE_GPU_BUFFER_BYTES = 512ULL * 1024 * 1024;
+
+inline void LogHugeBufferRequest(const char* what, DAddr address, u64 size) {
+    static std::atomic<u32> logged{};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+        LOG_ERROR(HW_GPU, "Huge GPU buffer request ({}): {} bytes at {:#x}", what, size, address);
+    }
+}
+
 template <class P>
 bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount) {
     const std::optional<DAddr> cpu_src_address = gpu_memory->GpuToCpuAddress(src_address);
     const std::optional<DAddr> cpu_dest_address = gpu_memory->GpuToCpuAddress(dest_address);
     if (!cpu_src_address || !cpu_dest_address) {
+        return false;
+    }
+    if (amount > HUGE_GPU_BUFFER_BYTES) {
+        // Build 4 guard: a copy this size would make the cache create a buffer of gigabytes and
+        // stage all of it (Pokopia died allocating 4 GiB). Leave it to the software DMA path.
+        LogHugeBufferRequest("DMA copy", *cpu_dest_address, amount);
         return false;
     }
     const bool source_dirty = IsRegionRegistered(*cpu_src_address, amount);
@@ -331,6 +349,10 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     }
 
     const size_t size = amount * sizeof(u32);
+    if (size > HUGE_GPU_BUFFER_BYTES) {
+        LogHugeBufferRequest("DMA clear", *cpu_dst_address, size);
+        return false;
+    }
     ClearDownload(*cpu_dst_address, size);
     gpu_modified_ranges.Subtract(*cpu_dst_address, size);
 
@@ -1912,6 +1934,10 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
     const OverlapResult overlap = ResolveOverlaps(device_addr, wanted_size);
     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
+    if (overlap.end - overlap.begin > HUGE_GPU_BUFFER_BYTES) {
+        // Diagnostic only: names the address of a giant cached buffer before the allocation fails.
+        LogHugeBufferRequest("cached buffer", overlap.begin, overlap.end - overlap.begin);
+    }
     const BufferId new_buffer_id =
         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);
     auto& new_buffer = slot_buffers[new_buffer_id];

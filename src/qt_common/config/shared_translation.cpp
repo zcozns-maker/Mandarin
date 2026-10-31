@@ -166,6 +166,40 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, use_disk_shader_cache, tr("Use persistent pipeline cache"),
            tr("Allows saving shaders to storage for faster loading on following game "
               "boots.\nDisabling it is only intended for debugging."));
+    // Switch 2 / Eden-NS2 (per game: right-click a game -> Properties -> Graphics -> Advanced)
+    INSERT(Settings, ns2_lower_isbe_attr, tr("Switch 2 / Eden-NS2: ISBE attribute lowering"),
+           tr("Translates Ampere ISBERD/ISBEWR stage-buffer attribute reads and writes.\n"
+              "Experimental; enable per game (e.g. Mario Kart World)."));
+    INSERT(Settings, ns2_lower_warpsync_relaxed, tr("Switch 2 / Eden-NS2: Relaxed full-mask WARPSYNC"),
+           tr("Lowers full-mask WARPSYNC to a memory barrier instead of rejecting the shader.\n"
+              "Experimental; enable per game."));
+    INSERT(Settings, ns2_lower_surface_atomic, tr("Switch 2 / Eden-NS2: Surface atomics (SUATOM/SURED)"),
+           tr("Translates surface atomic and reduction instructions.\nExperimental; enable per game."));
+    INSERT(Settings, ns2_lower_surface_dims, tr("Switch 2 / Eden-NS2: 1D/buffer/array surface loads and stores"),
+           tr("Accepts more SULD/SUST surface dimensions.\nExperimental; enable per game."));
+    INSERT(Settings, ns2_lower_local_vector_spill, tr("Switch 2 / Eden-NS2: 64/128-bit local memory spills"),
+           tr("Translates wide LDL/STL local memory accesses (register spills).\n"
+              "Experimental; enable per game (e.g. Pokopia)."));
+    INSERT(Settings, ns2_lower_uniform_vote, tr("Switch 2 / Eden-NS2: Uniform vote (UVOTE)"),
+           tr("Translates warp vote instructions that write a uniform predicate.\n"
+              "Experimental; enable per game."));
+    INSERT(Settings, ns2_lower_isbewr_drop, tr("Switch 2 / Eden-NS2: Drop unskewed ISBEWR (diagnostic)"),
+           tr("Drops stage-buffer writes that cannot be translated so the rest of the shader runs.\n"
+              "Diagnostic only; may cause wrong output."));
+    INSERT(Settings, ns2_lower_audit_fsel, tr("Switch 2 / Eden-NS2: FSEL operand modifiers (diagnostic)"),
+           tr("Applies FSEL neg/abs operand modifiers. May change colours in some games."));
+    INSERT(Settings, ns2_fence_timeout_ms, tr("Switch 2 / Eden-NS2: Fence wait timeout (ms, 0 = off)"),
+           tr("Gives up a stalled GPU fence wait after this many milliseconds instead of waiting forever.\n"
+              "0 keeps the original behaviour. Giving up early can let a game read unfinished GPU results."));
+    INSERT(Settings, ns2_native_strict, tr("Switch 2 / Eden-NS2: Strict native GPU mode (debug)"),
+           tr("Stalls on native GPU work that cannot be translated instead of skipping it.\n"
+              "Debugging only; usually freezes the game."));
+    INSERT(Settings, ns2_pipeline_guard, tr("Switch 2 / Eden-NS2: Driver crash guard for pipelines"),
+           tr("Remembers pipelines that crashed the GPU driver and skips them on later boots.\n"
+              "Recommended on."));
+    INSERT(Settings, ns2_hang_dump_seconds, tr("Switch 2 / Eden-NS2: Hang dump after (s, 0 = off)"),
+           tr("When no frame is shown for this many seconds, writes what every game thread is waiting on to the log.\n"
+              "Diagnostic only."));
     INSERT(
         Settings, use_asynchronous_gpu_emulation, tr("Use asynchronous GPU emulation"),
         tr("Uses an extra CPU thread for rendering.\nThis option should always remain enabled."));

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include "common/ns2_options.h"
 #include "video_core/native_diagnostics.h"
 #include <bitset>
 #include <cstdlib>
@@ -417,7 +418,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             // The dispatch already completed and released its semaphores. The QMD and macro dumps
             // below write several files per call, which dominates the frame time when a shader is
             // rejected on every dispatch.
-            static const bool strict = std::getenv("EDEN_NATIVE_STRICT") != nullptr;
+            const bool strict = Settings::NS2::NativeStrict();
             if (!strict) return true;
         }
         std::array<u32, 128> qmd{};

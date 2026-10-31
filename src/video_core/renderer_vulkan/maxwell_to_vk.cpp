@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <atomic>
 #include <iterator>
 
 #include "common/assert.h"
@@ -239,7 +241,18 @@ FormatInfo SurfaceFormat(const Device& device, FormatType format_type, bool with
     SURFACE_FORMAT_ELEM(VK_FORMAT_D32_SFLOAT_S8_UINT, usage_attachable, D32_FLOAT_S8_UINT)
 #define SURFACE_FORMAT_ELEM(res, usage, pixel) case PixelFormat::pixel: tuple = {res, usage}; break;
     SURFACE_FORMAT_LIST
-    default: UNREACHABLE_MSG("unknown format {}", pixel_format);
+    default: {
+        // Unknown/Invalid formats used to hit UNREACHABLE (fatal). Log each raw value once and
+        // fall back to RGBA8 so the image can still be created.
+        static std::array<std::atomic<bool>, 512> reported{};
+        const auto raw = static_cast<u32>(pixel_format);
+        if (raw >= reported.size() || !reported[raw].exchange(true)) {
+            LOG_ERROR(Render_Vulkan, "SurfaceFormat: unsupported pixel format {} (raw {}), using A8B8G8R8_UNORM",
+                      pixel_format, raw);
+        }
+        tuple = {VK_FORMAT_A8B8G8R8_UNORM_PACK32, usage_attachable | usage_storage};
+        break;
+    }
 #undef SURFACE_FORMAT_ELEM
 #undef SURFACE_FORMAT_LIST
     }

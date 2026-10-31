@@ -37,6 +37,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_pipeline_crash_guard.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -582,6 +583,9 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
             return BuiltPipeline(current_pipeline);
         }
     }
+    if (has_failed_graphics_key && graphics_key == failed_graphics_key) {
+        return nullptr;
+    }
     return CurrentGraphicsPipelineSlowPath();
 }
 
@@ -838,6 +842,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         pipeline = CreateGraphicsPipeline();
     }
     if (!pipeline) {
+        failed_graphics_key = graphics_key;
+        has_failed_graphics_key = true;
         return nullptr;
     }
     if (current_pipeline) {
@@ -857,6 +863,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     // If something is using depth, we can assume that games are not rendering anything which
     // will be used one time.
     if (maxwell3d->regs.zeta_enable) {
+        // Dropped on purpose while the pipeline builds, same as below: not failed native work.
+        draw_deferred = true;
         return nullptr;
     }
     // If games are using a small index count, we can assume these are full screen quads.
@@ -878,6 +886,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     bool build_in_parallel) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
+    if (PipelineCrashGuard::IsBad(hash)) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 16) {
+            LOG_WARNING(Render_Vulkan, "Skipping pipeline {:016x}: it crashed the driver before",
+                        hash);
+        }
+        return nullptr;
+    }
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
@@ -885,6 +901,30 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
     // Layer passthrough generation for devices without VK_EXT_shader_viewport_index_layer
     Shader::IR::Program* layer_source_program{};
+
+    // An emulated passthrough geometry shader re-emits the draw's input primitive.
+    Shader::HostTranslateInfo pipeline_host_info{host_info};
+    switch (key.state.topology) {
+    case Maxwell::PrimitiveTopology::Points:
+        pipeline_host_info.passthrough_input_vertices = 1;
+        break;
+    case Maxwell::PrimitiveTopology::Lines:
+    case Maxwell::PrimitiveTopology::LineLoop:
+    case Maxwell::PrimitiveTopology::LineStrip:
+        pipeline_host_info.passthrough_input_vertices = 2;
+        break;
+    case Maxwell::PrimitiveTopology::Triangles:
+    case Maxwell::PrimitiveTopology::TriangleStrip:
+    case Maxwell::PrimitiveTopology::TriangleFan:
+    case Maxwell::PrimitiveTopology::Quads:
+    case Maxwell::PrimitiveTopology::QuadStrip:
+    case Maxwell::PrimitiveTopology::Polygon:
+    case Maxwell::PrimitiveTopology::Patches:
+        pipeline_host_info.passthrough_input_vertices = 3;
+        break;
+    default:
+        break;
+    }
 
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         const bool is_emulated_stage = layer_source_program != nullptr &&
@@ -905,11 +945,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
         if (!uses_vertex_a || index != 1) {
             // Normal path
-            programs[index] = TranslateProgram(pools.inst, pools.block, env, cfg, host_info);
+            programs[index] = TranslateProgram(pools.inst, pools.block, env, cfg, pipeline_host_info);
         } else {
             // VertexB path when VertexA is present.
             auto& program_va{programs[0]};
-            auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+            auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, pipeline_host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
         }
 
@@ -1030,7 +1070,7 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
     const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
     if (elapsed > std::chrono::milliseconds{2} && logged < 400) {
         ++logged;
-        LOG_INFO(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms", kind, ms(elapsed));
+        LOG_DEBUG(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms", kind, ms(elapsed));
     }
     if (now - window > std::chrono::seconds{10}) {
         LOG_INFO(Render_Vulkan, "Runtime pipelines in the last 10 s: {} built, {:.1f} ms on the GPU thread",

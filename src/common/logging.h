@@ -7,6 +7,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <algorithm>
 #include <type_traits>
 #include <fmt/ranges.h>
@@ -139,5 +140,11 @@ void Stop();
 /// The global filter will prevent any messages from even being processed if they are filtered.
 void SetGlobalFilter(const Filter& filter);
 void SetColorConsoleBackendEnabled(bool enabled);
+
+/// Starts copying the log into log/<title id>/eden_log.txt (the previous run of that game is kept
+/// as eden_log.old.txt). Does nothing when the per-game log setting is off.
+void StartGameLog(std::uint64_t title_id);
+/// Flushes and closes the per-game log, if one is open.
+void StopGameLog();
 
 } // namespace Common::Log

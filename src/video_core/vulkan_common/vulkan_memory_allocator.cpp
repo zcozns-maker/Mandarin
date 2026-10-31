@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <limits>
 #include <optional>
@@ -85,7 +86,33 @@ namespace {
         }
         return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     }
+    std::atomic<u32> memory_pressure_events{};
+    std::atomic<bool> memory_pressure_seen{};
+
+    // Logs the heap budgets the first few times an allocation fails, so a log shows which heap
+    // was full (or that none was, i.e. the driver refused for another reason).
+    void LogOutOfMemory(const Device& device, const char* what, VkDeviceSize bytes) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 6) {
+            LOG_WARNING(Render_Vulkan, "Out of video memory allocating {} ({} bytes); heap budgets:",
+                        what, bytes);
+            LogMemoryStatistics(device);
+        }
+    }
 } // namespace
+
+void NoteMemoryPressure() noexcept {
+    memory_pressure_events.fetch_add(1, std::memory_order_relaxed);
+    memory_pressure_seen.store(true, std::memory_order_relaxed);
+}
+
+u32 TakeMemoryPressureEvents() noexcept {
+    return memory_pressure_events.exchange(0, std::memory_order_relaxed);
+}
+
+bool HasHadMemoryPressure() noexcept {
+    return memory_pressure_seen.load(std::memory_order_relaxed);
+}
 
 //MemoryCommit is now VMA-backed
 MemoryCommit::MemoryCommit(VmaAllocator alloc, VmaAllocation a,
@@ -202,9 +229,68 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
             }
         });
     }
+
+    // Reserve: 64 MiB of host-visible memory allocated up front (growing to at most 256 MiB).
+    // When video memory is full and the driver also refuses new system-memory allocations
+    // (Mario Kart World: "buffer of 1048576 bytes placed in system memory (failed)", then an
+    // abort), small buffers are placed here so the game keeps running while the texture cache
+    // frees images. Costs 64 MiB of system RAM.
+    {
+        using namespace Common::Literals;
+        const VkBufferCreateInfo sample_ci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = 1_MiB,
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                     VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+                     VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        };
+        VmaAllocationCreateInfo reserve_ci{};
+        reserve_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        reserve_ci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+        reserve_ci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        u32 type_index{};
+        if (vmaFindMemoryTypeIndexForBufferInfo(allocator, &sample_ci, &reserve_ci, &type_index) ==
+            VK_SUCCESS) {
+            VmaPoolCreateInfo pool_ci{};
+            pool_ci.memoryTypeIndex = type_index;
+            pool_ci.blockSize = 64_MiB;
+            pool_ci.minBlockCount = 1;
+            pool_ci.maxBlockCount = 4;
+            if (vmaCreatePool(allocator, &pool_ci, &reserve_pool) != VK_SUCCESS) {
+                reserve_pool = VK_NULL_HANDLE;
+                LOG_WARNING(Render_Vulkan, "Could not create the out-of-memory reserve pool");
+            }
+        }
+    }
 }
 
-MemoryAllocator::~MemoryAllocator() = default;
+MemoryAllocator::~MemoryAllocator() {
+    if (reserve_pool != VK_NULL_HANDLE) {
+        vmaDestroyPool(allocator, reserve_pool);
+    }
+}
+
+VkResult MemoryAllocator::CreateBufferFromReserve(const VkBufferCreateInfo &ci, MemoryUsage usage,
+                                                  VkBuffer &handle, VmaAllocation &allocation,
+                                                  VmaAllocationInfo &alloc_info) const {
+    if (reserve_pool == VK_NULL_HANDLE) {
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    VmaAllocationCreateInfo reserve_ci{};
+    reserve_ci.flags = MemoryUsageVmaFlags(usage);
+    reserve_ci.usage = VMA_MEMORY_USAGE_UNKNOWN;
+    reserve_ci.pool = reserve_pool;
+    return vmaCreateBuffer(allocator, &ci, &reserve_ci, &handle, &allocation, &alloc_info);
+}
 
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
 {
@@ -229,9 +315,47 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
     // unbacked sparse fallback below.
     const u64 texels = u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers;
     const bool huge = texels > (u64{1} << 28);
-    VkResult result = huge ? VK_ERROR_OUT_OF_DEVICE_MEMORY
+    // Last resort before an unbacked image (whose contents read as zero, i.e. missing textures):
+    // place the image in system memory. Sampling it goes over PCIe, slower but correct. Used when
+    // VRAM is exhausted, and for "huge" images that are not actually large in bytes (MKW's
+    // 16384x16384x2 R8 arrays are ~0.7 GB with mips; 2^28 texels is ~24 GB only for RGBA16F).
+    constexpr VkDeviceSize MaxSystemMemoryImage = VkDeviceSize{1} << 30;
+    const auto try_system_memory = [&](const char* why) -> VkResult {
+        if (huge) {
+            // Ask the driver for the real size before committing system memory to it.
+            VkImage probe{};
+            const auto& dld = device.GetDispatchLoader();
+            if (dld.vkCreateImage(*device.GetLogical(), &ci, nullptr, &probe) != VK_SUCCESS) {
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+            VkMemoryRequirements requirements{};
+            dld.vkGetImageMemoryRequirements(*device.GetLogical(), probe, &requirements);
+            dld.vkDestroyImage(*device.GetLogical(), probe, nullptr);
+            if (requirements.size > MaxSystemMemoryImage) {
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            }
+        }
+        VmaAllocationCreateInfo host_ci = alloc_ci;
+        host_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        host_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        host_ci.preferredFlags = 0;
+        const VkResult host_result = vmaCreateImage(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+        if (host_result == VK_SUCCESS) {
+            static std::atomic<u32> logged{};
+            if (logged++ < 32) {
+                LOG_WARNING(Render_Vulkan,
+                            "Image {}x{}x{} ({} levels, {} layers, format {}) {}; placed in system "
+                            "memory ({} MiB)",
+                            ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
+                            ci.arrayLayers, static_cast<u32>(ci.format), why, alloc_info.size >> 20);
+            }
+        }
+        return host_result;
+    };
+    VkResult result = huge ? try_system_memory("is too large for video memory")
                            : vmaCreateImage(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
+        NoteMemoryPressure();
         // Over the device memory budget (Switch 2 titles fill 8 GB cards): let the driver page
         // it out rather than failing the draw and aborting.
         static u32 logged{};
@@ -245,6 +369,13 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
         VmaAllocationCreateInfo relaxed = alloc_ci;
         relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            result = try_system_memory("does not fit in video memory");
+        }
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            LogOutOfMemory(device, "an image", VkDeviceSize{ci.extent.width} * ci.extent.height *
+                                                   ci.extent.depth * ci.arrayLayers);
+        }
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && ci.imageType != VK_IMAGE_TYPE_1D) {
         // Too big to back at all, e.g. title 1's sparse virtual texture arrays (8192x8192,
@@ -308,19 +439,41 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VkMemoryPropertyFlags property_flags{};
 
     VkResult result = vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
-    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
-        // Video memory is full: place the buffer in system memory the GPU can read (slower than
-        // VRAM, but the game keeps running instead of aborting).
-        VmaAllocationCreateInfo host_ci = alloc_ci;
-        host_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        host_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-        host_ci.preferredFlags = 0;
-        host_ci.memoryTypeBits = 0;
-        result = vmaCreateBuffer(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
-        static u32 logged{};
-        if (logged++ < 16) {
-            LOG_WARNING(Render_Vulkan, "Video memory full: buffer of {} bytes placed in system memory ({})",
-                        ci.size, result == VK_SUCCESS ? "ok" : "failed");
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        // Over budget or out of video memory. Degrade step by step instead of aborting, and tell
+        // the texture cache to free images (it runs its collector on the next frame):
+        // 1. the same memory without the budget limit (the driver may page),
+        // 2. system memory the GPU can read (slower than VRAM),
+        // 3. the same in its own small allocation (no 256 MiB block needed),
+        // 4. the pre-allocated host-visible reserve pool.
+        NoteMemoryPressure();
+        const char* placed = "video memory over budget";
+        VmaAllocationCreateInfo relaxed_ci = alloc_ci;
+        relaxed_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateBuffer(allocator, &ci, &relaxed_ci, &handle, &allocation, &alloc_info);
+        if (result != VK_SUCCESS) {
+            placed = "system memory";
+            VmaAllocationCreateInfo host_ci = relaxed_ci;
+            host_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            host_ci.preferredFlags = 0;
+            host_ci.memoryTypeBits = 0;
+            result = vmaCreateBuffer(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+            if (result != VK_SUCCESS) {
+                placed = "a dedicated system memory allocation";
+                host_ci.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+                host_ci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+                result = vmaCreateBuffer(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+            }
+            if (result != VK_SUCCESS) {
+                LogOutOfMemory(device, "a buffer", ci.size);
+                placed = "the out-of-memory reserve";
+                result = CreateBufferFromReserve(ci, usage, handle, allocation, alloc_info);
+            }
+        }
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 16) {
+            LOG_WARNING(Render_Vulkan, "Video memory full: buffer of {} bytes placed in {} ({})",
+                        ci.size, placed, result == VK_SUCCESS ? "ok" : "failed");
         }
     }
     if (result != VK_SUCCESS) {
@@ -383,8 +536,38 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VmaAllocation allocation{};
     VkMemoryPropertyFlags property_flags{};
 
-    vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
-                                           &allocation, &alloc_info));
+    VkResult result = vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment,
+                                                   &handle, &allocation, &alloc_info);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        // Same degradation as CreateBuffer above (the reserve pool's blocks are 64 MiB aligned
+        // far beyond any min_alignment, and VMA honours the alignment inside them).
+        NoteMemoryPressure();
+        VmaAllocationCreateInfo relaxed_ci = alloc_ci;
+        relaxed_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateBufferWithAlignment(allocator, &ci, &relaxed_ci, min_alignment, &handle,
+                                              &allocation, &alloc_info);
+        if (result != VK_SUCCESS) {
+            VmaAllocationCreateInfo host_ci = relaxed_ci;
+            host_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            host_ci.preferredFlags = 0;
+            host_ci.memoryTypeBits = 0;
+            result = vmaCreateBufferWithAlignment(allocator, &ci, &host_ci, min_alignment, &handle,
+                                                  &allocation, &alloc_info);
+        }
+        if (result != VK_SUCCESS && reserve_pool != VK_NULL_HANDLE) {
+            LogOutOfMemory(device, "an aligned buffer", ci.size);
+            VmaAllocationCreateInfo reserve_ci{};
+            reserve_ci.flags = MemoryUsageVmaFlags(usage);
+            reserve_ci.pool = reserve_pool;
+            result = vmaCreateBufferWithAlignment(allocator, &ci, &reserve_ci, min_alignment,
+                                                  &handle, &allocation, &alloc_info);
+        }
+    }
+    if (result != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "Aligned buffer allocation failed: bytes={}, usage={}, result={}",
+                     ci.size, static_cast<u32>(usage), static_cast<s32>(result));
+    }
+    vk::Check(result);
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
     u8 *data = reinterpret_cast<u8 *>(alloc_info.pMappedData);
@@ -419,6 +602,7 @@ MemoryCommit MemoryAllocator::Commit(const VkMemoryRequirements &reqs, MemoryUsa
     VkResult res = vmaAllocateMemory(allocator, &reqs, &ci, &a, &info);
 
     if (res != VK_SUCCESS) {
+        NoteMemoryPressure();
         // Relax 1: drop budget constraint
         auto ci2 = ci;
         ci2.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
@@ -485,7 +669,7 @@ void LogMemoryStatistics(const Device& device) {
         if (s.blockCount == 0) {
             continue;
         }
-        LOG_INFO(Render_Vulkan, "VMA type {} (heap {}, flags {:#x}): {} blocks {} MiB, {} allocations {} MiB",
+        LOG_DEBUG(Render_Vulkan, "VMA type {} (heap {}, flags {:#x}): {} blocks {} MiB, {} allocations {} MiB",
                  type, properties->memoryTypes[type].heapIndex,
                  static_cast<u32>(properties->memoryTypes[type].propertyFlags), s.blockCount,
                  s.blockBytes >> 20, s.allocationCount, s.allocationBytes >> 20);

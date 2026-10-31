@@ -12,6 +12,7 @@
 #include <fmt/ranges.h>
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/ns2_options.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
@@ -147,10 +148,33 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
 
     const auto check_failing = [&]() {
         if (events[slot].fails > 2) {
+            // The old unbounded wait here stalled every guest core until the syncpoint arrived. When
+            // that syncpoint depends on the guest (a channel parked on a guest semaphore, or a video
+            // decode the game has not submitted yet) the whole title froze for good (Yoshi demo,
+            // second movie). Wait a bounded time and fall back to the normal timeout path.
+            // Build 4: opt-in only (EDEN_NS2_FENCE_TIMEOUT_MS=<ms>); unset keeps the original
+            // unbounded wait, since giving up early can let a game read unfinished GPU results.
+            // Also a per-game setting (ns2_fence_timeout_ms); the environment variable wins.
+            const long long timeout_ms = Settings::NS2::FenceTimeoutMs();
+            bool reached = true;
             {
                 auto lk = system.StallApplication();
-                host1x_syncpoint_manager.WaitHost(fence_id, target_value);
+                if (timeout_ms > 0) {
+                    reached = host1x_syncpoint_manager.WaitHostFor(fence_id, target_value,
+                                                                   std::chrono::milliseconds{timeout_ms});
+                } else {
+                    host1x_syncpoint_manager.WaitHost(fence_id, target_value);
+                }
                 system.UnstallApplication();
+            }
+            if (!reached) {
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+                    LOG_WARNING(Service_NVDRV,
+                                "Stalled fence wait gave up after {} ms: syncpoint {} value {} (slot {}, fails {})",
+                                timeout_ms, fence_id, target_value, slot, events[slot].fails);
+                }
+                return false;
             }
             params.value.raw = target_value;
             return true;

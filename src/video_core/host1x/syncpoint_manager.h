@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <list>
@@ -57,6 +58,9 @@ public:
     void WaitGuest(u32 syncpoint_id, u32 expected_value);
 
     void WaitHost(u32 syncpoint_id, u32 expected_value);
+
+    /// Waits at most `timeout`; returns whether the syncpoint reached the value.
+    bool WaitHostFor(u32 syncpoint_id, u32 expected_value, std::chrono::milliseconds timeout);
 
     bool IsReadyGuest(u32 syncpoint_id, u32 expected_value) const {
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;

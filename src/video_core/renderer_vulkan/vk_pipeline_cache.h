@@ -168,6 +168,11 @@ private:
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
+    // The last key whose pipeline could not be created (it crashed the driver before, or a stage
+    // failed). Draws repeating it return at once instead of hashing the key into graphics_cache;
+    // Bananza skipped millions of such draws.
+    GraphicsPipelineCacheKey failed_graphics_key{};
+    bool has_failed_graphics_key{};
 
     ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;

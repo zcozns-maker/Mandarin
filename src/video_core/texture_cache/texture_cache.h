@@ -9,6 +9,7 @@
 #include "video_core/native_diagnostics.h"
 #include "video_core/native_texture_capture.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <limits>
@@ -144,7 +145,7 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 }
 
 template <class P>
-void TextureCache<P>::RunGarbageCollector() {
+void TextureCache<P>::RunGarbageCollector(bool emergency) {
     bool high_priority_mode = false;
     bool aggressive_mode = false;
     u64 ticks_to_destroy = 0;
@@ -160,6 +161,14 @@ void TextureCache<P>::RunGarbageCollector() {
         }();
         ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
+        if (emergency) {
+            // An allocation just ran out of video memory: free anything unused for a few frames,
+            // many images at once, until usage is back under the (lowered) thresholds.
+            high_priority_mode = true;
+            aggressive_mode = true;
+            ticks_to_destroy = (std::max<u64>)(4, min_age);
+            num_iterations = 400;
+        }
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode](ImageId image_id) {
         if (num_iterations == 0) {
@@ -202,9 +211,12 @@ void TextureCache<P>::RunGarbageCollector() {
         }
         return false;
     };
-    Configure(false);
+    Configure(emergency);
+    if (frame_tick <= ticks_to_destroy) {
+        return;
+    }
     lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
-    if (total_used_memory >= critical_memory) {
+    if (!emergency && total_used_memory >= critical_memory) {
         Configure(true);
         lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
     }
@@ -255,10 +267,13 @@ void TextureCache<P>::TickFrame() {
         if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
             if (native_thresholds_applied && budget_check_frames++ % 60 == 0) {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
-                if (budget > 2_GiB) {
+                if (budget > 2_GiB + pressure_margin) {
                     const u64 old_critical = critical_memory;
-                    critical_memory = budget - 768_MiB;
-                    expected_memory = budget - 1536_MiB;
+                    critical_memory = budget - 768_MiB - pressure_margin;
+                    expected_memory = budget - 1536_MiB - pressure_margin;
+                    if (expected_memory < 1_GiB) {
+                        expected_memory = 1_GiB;
+                    }
                     // Log only real changes (the budget moves by a few MiB all the time).
                     const u64 change = critical_memory > old_critical
                                            ? critical_memory - old_critical
@@ -271,6 +286,29 @@ void TextureCache<P>::TickFrame() {
     // If we can obtain the memory info, use it instead of the estimate.
     if (runtime.CanReportMemoryUsage()) {
         total_used_memory = runtime.GetDeviceMemoryUsage();
+    }
+    // Allocations ran out of video memory since the last frame (Mario Kart World on an 8 GB
+    // card): collect at once instead of waiting for the thresholds, and lower the thresholds
+    // by 512 MiB per incident (at most 1.5 GiB, once per second) so the working set stays
+    // under what the driver will actually give us.
+    bool emergency_collect = false;
+    if constexpr (requires { runtime.TakeMemoryPressureEvents(); }) {
+        if (const u32 events = runtime.TakeMemoryPressureEvents(); events != 0) {
+            emergency_collect = true;
+            if (pressure_margin < 1536_MiB && frame_tick >= last_pressure_frame + 60) {
+                last_pressure_frame = frame_tick;
+                pressure_margin += 512_MiB;
+                critical_memory = critical_memory > 1536_MiB + 512_MiB ? critical_memory - 512_MiB
+                                                                        : critical_memory;
+                expected_memory = expected_memory > 1_GiB + 512_MiB ? expected_memory - 512_MiB
+                                                                     : expected_memory;
+                LOG_WARNING(HW_GPU,
+                            "Video memory ran out ({} allocation failures); freeing unused "
+                            "images and lowering texture cache thresholds to expected {} MiB, "
+                            "critical {} MiB",
+                            events, expected_memory >> 20, critical_memory >> 20);
+            }
+        }
     }
     // Every 600 frames: device memory in use against the collector's thresholds, and what the
     // images themselves account for (VRAM pressure makes the collector thrash).
@@ -295,7 +333,7 @@ void TextureCache<P>::TickFrame() {
                           largest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
         for (size_t i = 0; i < std::min<size_t>(12, largest.size()); ++i) {
             const Image& image = *largest[i].second;
-            LOG_INFO(HW_GPU, "  {} MiB: {:#x} {}x{}x{} layers {} levels {} format {} type {} flags {:#x}",
+            LOG_DEBUG(HW_GPU, "  {} MiB: {:#x} {}x{}x{} layers {} levels {} format {} type {} flags {:#x}",
                      largest[i].first >> 20, image.gpu_addr, image.info.size.width, image.info.size.height,
                      image.info.size.depth, image.info.resources.layers, image.info.resources.levels,
                      static_cast<u32>(image.info.format), static_cast<u32>(image.info.type),
@@ -305,7 +343,7 @@ void TextureCache<P>::TickFrame() {
         for (const auto& [format, total] : by_format) formats.emplace_back(total.first, format);
         std::sort(formats.rbegin(), formats.rend());
         for (size_t i = 0; i < std::min<size_t>(8, formats.size()); ++i) {
-            LOG_INFO(HW_GPU, "  format {}: {} MiB in {} images", formats[i].second, formats[i].first >> 20,
+            LOG_DEBUG(HW_GPU, "  format {}: {} MiB in {} images", formats[i].second, formats[i].first >> 20,
                      by_format[formats[i].second].second);
         }
         if constexpr (requires { runtime.LogMemoryStatistics(); }) {
@@ -324,7 +362,7 @@ void TextureCache<P>::TickFrame() {
         std::sort(shapes.rbegin(), shapes.rend());
         for (size_t i = 0; i < std::min<size_t>(10, shapes.size()); ++i) {
             const u64 key = shapes[i].second;
-            LOG_INFO(HW_GPU, "  created {}x: format {} type {} levels {} layers {} {}x{} (last at {:#x})",
+            LOG_DEBUG(HW_GPU, "  created {}x: format {} type {} levels {} layers {} {}x{} (last at {:#x})",
                      shapes[i].first, key >> 56, (key >> 52) & 0xF, (key >> 48) & 0xF,
                      (key >> 36) & 0xFFF, (key >> 18) & 0x3FFFF, key & 0x3FFFF,
                      created_shapes[key].second);
@@ -333,7 +371,9 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
-    if (total_used_memory > minimum_memory) {
+    if (emergency_collect) {
+        RunGarbageCollector(true);
+    } else if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
     }
     sentenced_images.Tick();
@@ -1285,6 +1325,10 @@ void TextureCache<P>::PopAsyncFlushes() {
 template <class P>
 ImageId TextureCache<P>::DmaImageId(const Tegra::DMA::ImageOperand& operand, bool is_upload) {
     const ImageInfo dst_info(operand);
+    if (dst_info.format == PixelFormat::Invalid) {
+        // Unusual bytes_per_pixel (e.g. 3/6/12): leave it to the software DMA path.
+        return NULL_IMAGE_ID;
+    }
     const ImageId dst_id = FindDMAImage(dst_info, operand.address);
     if (!dst_id) {
         return NULL_IMAGE_ID;
@@ -2237,8 +2281,13 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             // An ignored overlap whose contents only exist on the GPU cannot be merged into the new image;
             // MKW's native sparse remaps hit this (texture_cache.h assert after NativeRemap, which aborted
             // the process). Drop the stale contents instead of aborting.
-            LOG_WARNING(HW_GPU, "Dropping GPU-modified overlapping image at {:#x} while joining images",
-                        overlap.gpu_addr);
+            static std::atomic<u64> dropped_overlaps{};
+            const u64 dropped = ++dropped_overlaps;
+            if (dropped <= 32 || dropped % 1024 == 0)
+            {
+                LOG_WARNING(HW_GPU, "Dropping GPU-modified overlapping image at {:#x} while joining images (so far: {})",
+                            overlap.gpu_addr, dropped);
+            }
         }
         if (True(overlap.flags & ImageFlagBits::Tracked)) {
             UntrackImage(overlap, overlap_id);

@@ -113,6 +113,10 @@ private:
     /// @note The remembered entry is dropped when the first bytes of the shader changed
     void ThrowIfRejected(VAddr cpu_addr, GPUVAddr gpu_addr);
 
+    /// True when the shader at this address was rejected before and its code is unchanged.
+    /// Cheap (a hash of its first bytes); no exception, unlike ThrowIfRejected.
+    [[nodiscard]] bool IsRejected(VAddr cpu_addr, GPUVAddr gpu_addr);
+
     /// @brief Remembers that the shader at a given address was rejected by the compiler
     void RememberRejection(VAddr cpu_addr, GPUVAddr gpu_addr, const char* error);
 

@@ -10,6 +10,7 @@
 #include "common/logging.h"
 #include "common/random.h"
 #include "common/settings.h"
+#include "common/string_util.h"
 #include "core/core.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
@@ -110,6 +111,138 @@ static std::string RomFSProductVersion(const FileSys::VirtualDir& romfs_dir) {
     return fmt::format("{}.{}.{}", best[0], best[1], best[2]);
 }
 
+// Optional metadata for loose dumps that have no control data: a "title.txt" (first line is
+// the name) or "game.ini" (name=, version=) and an icon.png / icon.jpg, looked up next to main
+// and in the two folders above it.
+struct SidecarMetadata {
+    std::string name;
+    std::string version;
+    std::vector<u8> icon;
+};
+
+static std::string TrimSidecarText(std::string text) {
+    if (text.size() >= 3 && static_cast<u8>(text[0]) == 0xEF && static_cast<u8>(text[1]) == 0xBB &&
+        static_cast<u8>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+    }
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+static bool IsValidUtf8(const std::string& text) {
+    size_t i = 0;
+    while (i < text.size()) {
+        const u8 c = static_cast<u8>(text[i]);
+        size_t extra = 0;
+        if (c < 0x80) {
+            extra = 0;
+        } else if ((c & 0xE0) == 0xC0 && c >= 0xC2) {
+            extra = 1;
+        } else if ((c & 0xF0) == 0xE0) {
+            extra = 2;
+        } else if ((c & 0xF8) == 0xF0 && c <= 0xF4) {
+            extra = 3;
+        } else {
+            return false;
+        }
+        if (i + extra >= text.size() + (extra == 0 ? 1 : 0) && extra != 0) {
+            return false;
+        }
+        for (size_t k = 1; k <= extra; ++k) {
+            if (i + k >= text.size() || (static_cast<u8>(text[i + k]) & 0xC0) != 0x80) {
+                return false;
+            }
+        }
+        i += extra + 1;
+    }
+    return true;
+}
+
+// Sidecar files are hand-written, so accept UTF-8 (with or without BOM), UTF-16 with a BOM
+// (Notepad's "Unicode"), and fall back to Latin-1 / Windows-1252 for anything that isn't valid
+// UTF-8, so a name like "Pokémon" shows correctly whatever editor saved it.
+static std::string DecodeSidecarText(const std::vector<u8>& bytes) {
+    if (bytes.size() >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) ||
+                              (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
+        const bool little = bytes[0] == 0xFF;
+        std::u16string wide;
+        for (size_t i = 2; i + 1 < bytes.size(); i += 2) {
+            wide.push_back(static_cast<char16_t>(little ? (bytes[i] | (bytes[i + 1] << 8))
+                                                        : ((bytes[i] << 8) | bytes[i + 1])));
+        }
+        return Common::UTF16ToUTF8(wide);
+    }
+    std::string text(bytes.begin(), bytes.end());
+    if (text.size() >= 3 && static_cast<u8>(text[0]) == 0xEF && static_cast<u8>(text[1]) == 0xBB &&
+        static_cast<u8>(text[2]) == 0xBF) {
+        text.erase(0, 3);
+    }
+    if (IsValidUtf8(text)) {
+        return text;
+    }
+    std::string converted;
+    converted.reserve(text.size() * 2);
+    for (const char ch : text) {
+        const u8 c = static_cast<u8>(ch);
+        if (c < 0x80) {
+            converted.push_back(ch);
+        } else {
+            converted.push_back(static_cast<char>(0xC0 | (c >> 6)));
+            converted.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        }
+    }
+    return converted;
+}
+
+static SidecarMetadata ReadSidecarMetadata(const FileSys::VirtualDir& start_dir) {
+    SidecarMetadata result;
+    auto dir = start_dir;
+    for (int level = 0; level < 3 && dir != nullptr; ++level, dir = dir->GetParentDirectory()) {
+        if (result.name.empty()) {
+            if (const auto ini = dir->GetFile("game.ini")) {
+                const std::string text = DecodeSidecarText(ini->ReadAllBytes());
+                size_t pos = 0;
+                while (pos < text.size()) {
+                    auto end = text.find('\n', pos);
+                    if (end == std::string::npos) end = text.size();
+                    const std::string line = TrimSidecarText(text.substr(pos, end - pos));
+                    pos = end + 1;
+                    const auto eq = line.find('=');
+                    if (eq == std::string::npos || line.starts_with(';') || line.starts_with('#')) {
+                        continue;
+                    }
+                    const std::string key = TrimSidecarText(line.substr(0, eq));
+                    const std::string value = TrimSidecarText(line.substr(eq + 1));
+                    if ((key == "name" || key == "title") && result.name.empty()) {
+                        result.name = value;
+                    } else if (key == "version" && result.version.empty()) {
+                        result.version = value;
+                    }
+                }
+            }
+        }
+        if (result.name.empty()) {
+            if (const auto txt = dir->GetFile("title.txt")) {
+                std::string text = TrimSidecarText(DecodeSidecarText(txt->ReadAllBytes()));
+                result.name = TrimSidecarText(text.substr(0, text.find('\n')));
+            }
+        }
+        if (result.icon.empty()) {
+            for (const char* icon_name : {"icon.png", "icon.jpg", "icon.jpeg"}) {
+                if (const auto icon = dir->GetFile(icon_name)) {
+                    result.icon = icon->ReadAllBytes();
+                    break;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys::VirtualFile file_, bool override_update_)
     : AppLoader(std::move(file_))
     , override_update(override_update_)
@@ -172,6 +305,19 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
     // The loose RomFS beside the exefs folder (as ReadRomFS finds it).
     if (const auto title_dir = file_dir->GetParentDirectory()) {
         romfs_version = RomFSProductVersion(title_dir->GetSubdirectory("romfs"));
+    }
+
+    // Sidecar name/version/icon for dumps without control data (see ReadSidecarMetadata).
+    if (name.empty() || icon_data.empty()) {
+        auto sidecar = ReadSidecarMetadata(file_dir);
+        if (name.empty() && !sidecar.name.empty()) {
+            name = std::move(sidecar.name);
+            LOG_INFO(Loader, "Using sidecar title \"{}\" for {}", name, file_dir->GetName());
+        }
+        if (icon_data.empty() && !sidecar.icon.empty()) {
+            icon_data = std::move(sidecar.icon);
+        }
+        sidecar_version = std::move(sidecar.version);
     }
 }
 
@@ -414,6 +560,10 @@ ResultStatus AppLoader_DeconstructedRomDirectory::ReadControlData(FileSys::NACP&
 ResultStatus AppLoader_DeconstructedRomDirectory::ReadDisplayVersion(std::string& version) {
     if (control && !control->GetVersionString().empty()) {
         version = control->GetVersionString();
+        return ResultStatus::Success;
+    }
+    if (!sidecar_version.empty()) {
+        version = sidecar_version;
         return ResultStatus::Success;
     }
     if (!romfs_version.empty()) {

@@ -480,7 +480,8 @@ private:
         u64 completion_value{};
         if (image_id) {
             result = Kernel::ResultInvalidState;
-            if (configuration && !started) {
+            // Registration while started is allowed: games add buffers from their decode loop.
+            if (configuration) {
                 result = Kernel::ResultOutOfResource;
                 if (registered_images.size() < 8) {
                     result = Kernel::ResultInvalidState;
@@ -514,6 +515,10 @@ private:
                 }
             }
         }
+        if (result.IsFailure()) {
+            LOG_WARNING(Service_AM, "native video image register failed id={}, slots={}, result={:#x} (configured={}, started={})",
+                        image_id.value_or(0), registered_images.size(), result.raw, configuration.has_value(), started);
+        }
         LOG_DEBUG(Service_AM, "native video image register id={}, slots={}, result={:#x}", image_id.value_or(0), registered_images.size(), result.raw);
         IPC::ResponseBuilder rb{ctx, 10};
         rb.Push(result.raw);
@@ -546,6 +551,10 @@ private:
                     if (submission_event) submission_event->Clear(kernel);
                 }
             }
+        }
+        if (result.IsFailure()) {
+            LOG_WARNING(Service_AM, "native video stop failed result={:#x} (initialized={}, configured={}, started={})",
+                        result.raw, Initialized(), configuration.has_value(), started);
         }
         LOG_DEBUG(Service_AM, "native video stop result={:#x}", result.raw);
         IPC::ResponseBuilder rb{ctx, 2};
@@ -599,11 +608,18 @@ private:
         Result result = Kernel::ResultInvalidCombination;
         if (packet[0] == 0x16 && packet[1] == 0) {
             result = Kernel::ResultInvalidState;
-            if (Initialized() && configuration && !registered_images.empty() && !started) {
+            // Donkey Kong Bananza registers its output buffers from its decode loop, after Start, and
+            // its movie player aborts on any Start failure (2001-0125 at its second movie). Start only
+            // needs an initialized, configured decoder; a repeated Start is a no-op.
+            if (Initialized() && configuration && submission_event) {
                 started = true;
                 submission_event->Signal(kernel);
                 result = ResultSuccess;
             }
+        }
+        if (result.IsFailure()) {
+            LOG_WARNING(Service_AM, "native video start failed result={:#x} (initialized={}, configured={}, images={}, started={})",
+                        result.raw, Initialized(), configuration.has_value(), registered_images.size(), started);
         }
         LOG_DEBUG(Service_AM, "native video start result={:#x}", result.raw);
         IPC::ResponseBuilder rb{ctx, 2};
