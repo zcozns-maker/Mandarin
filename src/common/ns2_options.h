@@ -108,6 +108,11 @@ inline bool DropCrashedGeometryShader() {
     return env || Settings::values.ns2_drop_crashed_gs.GetValue();
 }
 
+// Per-game ns2_crashed_gs_single_lane: retry crash-guard pipelines with a single-lane geometry shader.
+inline bool CrashedGsSingleLane() {
+    return Settings::values.ns2_crashed_gs_single_lane.GetValue();
+}
+
 inline bool UndefZero() {
     static const bool env_off = [] {
         const char* const value = std::getenv("EDEN_NX2_UNDEF_ZERO");

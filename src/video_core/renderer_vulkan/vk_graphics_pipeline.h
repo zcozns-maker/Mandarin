@@ -72,6 +72,12 @@ class RescalingPushConstant;
 class RenderAreaPushConstant;
 class Scheduler;
 
+namespace Ns2PipelineBuild {
+/// Set by PipelineCache around the creation of an NS2 single-lane retry, read by the
+/// GraphicsPipeline constructor on the same thread.
+inline thread_local u64 retry_guard_hash = 0;
+} // namespace Ns2PipelineBuild
+
 class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
@@ -87,6 +93,8 @@ public:
         const std::array<const Shader::Info*, NUM_STAGES>& infos);
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
+    /// Built by the NS2 single-lane retry of a crash-guard pipeline (see PipelineCache).
+    bool IsNs2Retry() const noexcept { return ns2_retry; }
     bool SupportsAlphaToCoverage() const noexcept {
         return fragment_has_color0_output;
     }
@@ -145,6 +153,8 @@ private:
     void Validate();
 
     const GraphicsPipelineCacheKey key;
+    u64 guard_hash{};  ///< Crash-guard id of this build (key.Hash() unless an NS2 retry)
+    bool ns2_retry{};
     Tegra::Engines::Maxwell3D* maxwell3d;
     Tegra::MemoryManager* gpu_memory;
     const Device& device;

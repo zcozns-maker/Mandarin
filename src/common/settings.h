@@ -627,6 +627,11 @@ struct Values {
     // it instead of skipping its draws (AMD crashes on emulated passthrough geometry shaders).
     SwitchableSetting<bool> ns2_drop_crashed_gs{linkage, false, "ns2_drop_crashed_gs",
                                                 Category::RendererAdvanced};
+    // Per-game: rebuild crash-guard pipelines with a single-lane geometry shader (no subgroup
+    // operations), keeping the geometry shader, its culling and its buffer stores. Its
+    // crash-guard id differs from the original pipeline's.
+    SwitchableSetting<bool> ns2_crashed_gs_single_lane{linkage, false, "ns2_crashed_gs_single_lane",
+                                                       Category::RendererAdvanced};
     // Read traps (Eglantine 41a81ab5e3): GPU-written buffer pages the CPU reads are found by
     // trapping the first read, then copied back at fences (Mario Kart World's animated colliders).
     SwitchableSetting<bool> ns2_read_traps{linkage, false, "ns2_read_traps",

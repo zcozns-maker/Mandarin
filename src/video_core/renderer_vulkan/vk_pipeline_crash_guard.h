@@ -181,6 +181,17 @@ inline bool IsBad(u64 hash) {
     return s.bad.contains(hash);
 }
 
+/// Treat a pipeline as a suspect for this run: it is built alone, and a crash during its compile
+/// marks it bad on the next start (instead of first making it a suspect).
+inline void MarkSuspect(u64 hash) {
+    State& s = GetState();
+    std::scoped_lock lock{s.mutex};
+    if (!EnsureLoaded(s)) {
+        return;
+    }
+    s.suspects.insert(hash);
+}
+
 /// Scope of one driver compile.
 class Scope {
 public:

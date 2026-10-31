@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <chrono>
 #include "common/ns2_options.h"
 #include "video_core/gpu_write_watch.h"
 #include "video_core/native_diagnostics.h"
@@ -351,6 +352,39 @@ void LogFrameDraw(const Tegra::Engines::Maxwell3D& maxwell3d, bool is_indexed, b
 // Failed native draws by cause, for the periodic "failed draws so far" line.
 static std::array<std::atomic<u64>, 4> native_draw_failure_causes{};
 
+// NS2 single-lane retry of crash-guard pipelines (per-game ns2_crashed_gs_single_lane): after the
+// first draw with such a pipeline, three presented frames in a row over 500 ms make its draws be
+// skipped again for the rest of the session.
+namespace Ns2RetryWatchdog {
+std::atomic<bool> used{false};
+std::atomic<bool> tripped{false};
+std::chrono::steady_clock::time_point last_frame{};
+u32 slow_frames{};
+
+void Tick() {
+    const auto now = std::chrono::steady_clock::now();
+    const auto previous = last_frame;
+    last_frame = now;
+    if (!used.load(std::memory_order_relaxed) || tripped.load(std::memory_order_relaxed) ||
+        previous == std::chrono::steady_clock::time_point{}) {
+        return;
+    }
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - previous).count();
+    if (ms <= 500) {
+        slow_frames = 0;
+        return;
+    }
+    if (++slow_frames >= 3) {
+        tripped.store(true, std::memory_order_relaxed);
+        LOG_WARNING(Render_Vulkan,
+                    "Single-lane retry: {} frames in a row over 500 ms (last {} ms) after its "
+                    "first draw; skipping its draws again for this session",
+                    slow_frames, ms);
+    }
+}
+} // namespace Ns2RetryWatchdog
+
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
 
@@ -475,6 +509,31 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     }()};
     if (FrameEventsActive()) [[unlikely]] {
         LogFrameDraw(*maxwell3d, is_indexed, pipeline != nullptr);
+    }
+    if (pipeline && pipeline->IsNs2Retry()) {
+        if (Ns2RetryWatchdog::tripped.load(std::memory_order_relaxed)) {
+            if (maxwell3d->GetNativeMacroEngine().native_turing) {
+                report_failure("single-lane retry disabled by the frame-time watchdog", 0);
+            }
+            return;
+        }
+        if (!Ns2RetryWatchdog::used.exchange(true)) {
+            const auto& retry_draw = maxwell3d->draw_manager.draw_state;
+            const auto& retry_regs = maxwell3d->regs;
+            LOG_WARNING(Render_Vulkan,
+                        "Single-lane retry: first draw: topology {} indexed {} count {} instances "
+                        "{} viewport0 scale ({}, {}) translate ({}, {}) rt0 {:#x} {}x{} layers {} "
+                        "base layer {}",
+                        static_cast<u32>(retry_draw.topology), is_indexed,
+                        is_indexed ? retry_draw.index_buffer.count
+                                   : retry_draw.vertex_buffer.count,
+                        retry_draw.instance_count, retry_regs.viewport_transform[0].scale_x,
+                        retry_regs.viewport_transform[0].scale_y,
+                        retry_regs.viewport_transform[0].translate_x,
+                        retry_regs.viewport_transform[0].translate_y, retry_regs.rt[0].Address(),
+                        retry_regs.rt[0].width, retry_regs.rt[0].height,
+                        retry_regs.rt[0].depth.Value(), retry_regs.rt[0].base_layer);
+        }
     }
     if (!pipeline) {
         // A draw withheld for an asynchronous pipeline build is not a failure of the native work.
@@ -1698,6 +1757,7 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    Ns2RetryWatchdog::Tick();
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();

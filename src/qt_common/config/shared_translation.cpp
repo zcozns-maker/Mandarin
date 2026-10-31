@@ -212,6 +212,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("When the video memory heap has less than this many MiB left, textures unused for\n"
               "half a second are freed before allocations start failing (0 = off). 384 default;\n"
               "1024 helps 8 GB cards in Mario Kart World."));
+    INSERT(Settings, ns2_crashed_gs_single_lane,
+           tr("Switch 2 / Eden-NS2: Retry crashed pipelines with a single-lane geometry shader"),
+           tr("Pipelines the crash guard skipped are built again with their geometry shader kept\n"
+              "but without subgroup operations (its per-primitive buffer writes still happen).\n"
+              "If it crashes the driver again it is skipped next time; if frames stall for over\n"
+              "500 ms three times in a row its draws are skipped again for the session."));
     INSERT(Settings, ns2_drop_crashed_gs,
            tr("Switch 2 / Eden-NS2: Draw crashed pipelines without geometry shader"),
            tr("Pipelines the crash guard skipped because their geometry shader crashed the GPU\n"

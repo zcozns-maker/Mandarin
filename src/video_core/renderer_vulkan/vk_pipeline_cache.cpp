@@ -880,13 +880,45 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     return nullptr;
 }
 
+namespace {
+// True while CreateGraphicsPipeline builds an NS2 single-lane retry on this thread.
+thread_local bool ns2_single_lane_build = false;
+} // namespace
+
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
-    if (PipelineCrashGuard::IsBad(hash)) {
+    if (!ns2_single_lane_build && PipelineCrashGuard::IsBad(hash)) {
+        // Per-game ns2_crashed_gs_single_lane: build it again with the same key and stages, but
+        // with a geometry shader free of subgroup operations (warp operations emitted for one
+        // lane). The geometry shader still culls and still writes its buffers, and the key is
+        // unchanged, so pipeline transitions keep working (build8's drop changed the key). The
+        // retry has its own crash-guard id and starts as a suspect: one more driver crash marks
+        // it bad.
+        constexpr size_t retry_gs_index = static_cast<size_t>(Maxwell::ShaderType::Geometry);
+        if (Settings::NS2::CrashedGsSingleLane() && key.unique_hashes[retry_gs_index] != 0) {
+            const u64 retry_hash = static_cast<u64>(hash) ^ 0x51a6e1a7e0c0ffeeULL;
+            if (!PipelineCrashGuard::IsBad(retry_hash)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Pipeline {:016x} crashed the driver before: retrying it with a "
+                            "single-lane geometry shader {:016x} (crash-guard id {:016x})",
+                            hash, key.unique_hashes[retry_gs_index], retry_hash);
+                PipelineCrashGuard::MarkSuspect(retry_hash);
+                ns2_single_lane_build = true;
+                Ns2PipelineBuild::retry_guard_hash = retry_hash;
+                SCOPE_EXIT {
+                    ns2_single_lane_build = false;
+                    Ns2PipelineBuild::retry_guard_hash = 0;
+                };
+                return CreateGraphicsPipeline(pools, key, envs, statistics, build_in_parallel);
+            }
+            LOG_WARNING(Render_Vulkan,
+                        "Single-lane retry {:016x} of pipeline {:016x} crashed the driver before",
+                        retry_hash, hash);
+        }
         // Per-game ns2_drop_crashed_gs: build it again without its geometry shader (the stage
         // the AMD driver crashes on when passthrough is emulated) rather than skip its draws.
         constexpr size_t gs_index = static_cast<size_t>(Maxwell::ShaderType::Geometry);
@@ -935,6 +967,15 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
     // An emulated passthrough geometry shader re-emits the draw's input primitive.
     Shader::HostTranslateInfo pipeline_host_info{host_info};
+    Shader::Profile build_profile{profile};
+    if (ns2_single_lane_build) {
+        // Emit the geometry stage's warp operations for a single lane (ballot = own predicate,
+        // lane id 0, shuffles return the lane's own value): a warp-aggregated atomic append then
+        // appends each primitive exactly. GeometryCompactionPass is left off on purpose: its
+        // PrimitiveId slots collide across the records of a multi-draw indirect.
+        build_profile.supported_subgroup_stages &=
+            ~(1u << static_cast<u32>(Shader::Stage::Geometry));
+    }
     switch (key.state.topology) {
     case Maxwell::PrimitiveTopology::Points:
         pipeline_host_info.passthrough_input_vertices = 1;
@@ -1029,7 +1070,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 dump << Shader::IR::DumpProgram(program);
             }
         }
-        const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
+        const std::vector<u32> code{EmitSPIRV(build_profile, runtime_info, program, binding)};
         device.SaveShader(code);
         modules[stage_index] = BuildShader(device, code);
 

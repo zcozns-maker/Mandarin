@@ -271,6 +271,8 @@ GraphicsPipeline::GraphicsPipeline(
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {
+    ns2_retry = Ns2PipelineBuild::retry_guard_hash != 0;
+    guard_hash = ns2_retry ? Ns2PipelineBuild::retry_guard_hash : static_cast<u64>(key.Hash());
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -328,7 +330,7 @@ GraphicsPipeline::GraphicsPipeline(
             for (size_t i = 0; i < stage_hashes.size() && i < key.unique_hashes.size(); ++i) {
                 stage_hashes[i] = key.unique_hashes[i];
             }
-            PipelineCrashGuard::Scope guard{key.Hash(), stage_hashes};
+            PipelineCrashGuard::Scope guard{guard_hash, stage_hashes};
             MakePipeline(render_pass);
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
@@ -360,6 +362,12 @@ GraphicsPipeline::GraphicsPipeline(
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
+    // A pipeline whose key differs from the key it is cached under (build8's geometry-shader
+    // drop) never matches in Next(), so the slow path added it again on every switch and the
+    // lists grew without bound. Keep one entry per pipeline.
+    if (std::find(transitions.begin(), transitions.end(), transition) != transitions.end()) {
+        return;
+    }
     transition_keys.push_back(transition->key);
     transitions.push_back(transition);
 }
