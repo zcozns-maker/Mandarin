@@ -483,11 +483,11 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
         if (nacp_iter != files.end())
             nacp_file = *nacp_iter;
     }
-    for (const auto& dir : folders.search) {
+    for (const auto& search_dir : folders.search) {
         if (nacp_file != nullptr) {
             break;
         }
-        nacp_file = dir->GetFile("control.nacp");
+        nacp_file = search_dir->GetFile("control.nacp");
     }
 
     std::string title_source;
