@@ -339,7 +339,25 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
         host_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         host_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         host_ci.preferredFlags = 0;
-        const VkResult host_result = vmaCreateImage(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+        // Build 10: only memory types outside VRAM. "Prefer host" alone let VMA pick the full
+        // device-local heap again on AMD, so small images (MKW's 1024x1024 BC textures) failed
+        // here and became unbacked (missing textures) although 30 GB of system memory was free.
+        u32 host_types = 0;
+        for (u32 type = 0; type < properties.memoryTypeCount; ++type) {
+            if ((properties.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0) {
+                host_types |= 1U << type;
+            }
+        }
+        VkResult host_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        if (host_types != 0) {
+            host_ci.memoryTypeBits = host_types;
+            host_result = vmaCreateImage(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+        }
+        if (host_result != VK_SUCCESS) {
+            // The image cannot live in a host-only type here: let VMA choose as before.
+            host_ci.memoryTypeBits = 0;
+            host_result = vmaCreateImage(allocator, &ci, &host_ci, &handle, &allocation, &alloc_info);
+        }
         if (host_result == VK_SUCCESS) {
             static std::atomic<u32> logged{};
             if (logged++ < 32) {

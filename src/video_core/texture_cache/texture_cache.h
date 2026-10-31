@@ -2237,6 +2237,23 @@ template <class P>
 ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DAddr cpu_addr) {
     ImageInfo new_info = info;
     const size_t size_bytes = CalculateGuestSizeInBytes(new_info);
+    // Build 10: make room before a large image is created. The frame-tick collectors never run
+    // during loading screens (no frames are presented), which is when Mario Kart World filled its
+    // 8 GB card and its images fell back to unbacked memory. Only images unused for 30+ frames
+    // go (RunHeapFullCollection), at most once per 16 large allocations.
+    if constexpr (requires { runtime.IsDeviceMemoryNearlyFull(u64{}); }) {
+        static u32 large_allocations{};
+        const u64 headroom = static_cast<u64>(Settings::NS2::VramFreeEarlyMiB()) << 20;
+        if (headroom != 0 && size_bytes >= 4_MiB && (large_allocations++ % 16) == 0 &&
+            runtime.IsDeviceMemoryNearlyFull(headroom + size_bytes)) {
+            static u32 logged{};
+            if (logged++ < 16) {
+                LOG_WARNING(HW_GPU, "VRAM heap nearly full before a {} MiB image; freeing textures "
+                                    "unused for 30+ frames first", size_bytes >> 20);
+            }
+            RunHeapFullCollection(headroom + size_bytes);
+        }
+    }
     const bool broken_views = runtime.HasBrokenTextureViewFormats();
     const bool native_bgr = runtime.HasNativeBgr();
     join_overlap_ids.clear();

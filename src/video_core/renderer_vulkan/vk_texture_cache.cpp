@@ -2038,10 +2038,33 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
     }
 }
 
-void TextureCacheRuntime::TickFrame() {
+void TextureCacheRuntime::ReclaimPendingTranscodes(u64 limit) {
     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
+        pending_transcode_bytes -= pending_transcodes.front().bytes;
         pending_transcodes.pop_front();
     }
+    if (pending_transcode_bytes <= limit) {
+        return;
+    }
+    // Build 10 (Mario Kart World): the decode images were only freed once per presented frame,
+    // and loading screens present none, so a course load piled up GBs of them (VRAM 2.5 -> 6.9 GB
+    // in 7 s, then unbacked images and a driver crash). Wait for the oldest instead.
+    static u32 logged{};
+    if (logged++ < 16) {
+        LOG_WARNING(Render_Vulkan,
+                    "{} MiB of ASTC transcode images in flight ({}); waiting for the GPU to "
+                    "free them",
+                    pending_transcode_bytes >> 20, pending_transcodes.size());
+    }
+    while (!pending_transcodes.empty() && pending_transcode_bytes > limit / 2) {
+        scheduler.Wait(pending_transcodes.front().tick);
+        pending_transcode_bytes -= pending_transcodes.front().bytes;
+        pending_transcodes.pop_front();
+    }
+}
+
+void TextureCacheRuntime::TickFrame() {
+    ReclaimPendingTranscodes(~0ULL);
     static constexpr u32 MAX_UNUSED_SCRATCH_FRAMES = 60;
     std::erase_if(msaa_scratch_images, [this](MsaaScratchImage& scratch) {
         if (!scheduler.IsFree(scratch.tick)) {
@@ -3450,6 +3473,9 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     const u32 levels = static_cast<u32>(info.resources.levels) - skip;
     const u32 layers = static_cast<u32>(info.resources.layers);
     constexpr VkFormat DecodeFormat = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    // Free finished decode images now (not only once per presented frame) and keep at most
+    // 1 GiB of them in flight (see ReclaimPendingTranscodes).
+    ReclaimPendingTranscodes(u64{1} << 30);
     // The decode image lives only until the encode ran. Sub-allocated, not dedicated: streaming
     // worlds (Mario Kart World) transcode ~100 textures a second, and a vkAllocateMemory plus a
     // vkFreeMemory for each took several percent of the GPU thread. VMA still gives large ones
@@ -3536,6 +3562,14 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     });
     image.UploadMemory(output.buffer, output.offset, copies);
     pending.tick = scheduler.CurrentTick();
+    {
+        u64 bytes = 0;
+        for (u32 level = 0; level < levels; ++level) {
+            bytes += u64{(std::max)(width >> level, 1U)} * (std::max)(height >> level, 1U) * 4;
+        }
+        pending.bytes = bytes * layers;
+    }
+    pending_transcode_bytes += pending.bytes;
     pending_transcodes.push_back(std::move(pending));
 }
 
