@@ -111,14 +111,192 @@ static std::string RomFSProductVersion(const FileSys::VirtualDir& romfs_dir) {
     return fmt::format("{}.{}.{}", best[0], best[1], best[2]);
 }
 
-// Optional metadata for loose dumps that have no control data: a "title.txt" (first line is
-// the name) or "game.ini" (name=, version=) and an icon.png / icon.jpg, looked up next to main
-// and in the two folders above it.
+// One metadata path for every loose ExeFS/RomFS dump, so every game gets its icon, title and
+// version the same way, whatever folder layout its dumper used:
+//   <game>/exefs, <game>/base/exefs, <game>/updates/<version>/exefs, <game>/<Game_Name>/base/exefs
+// Searched folders, in order: the ExeFS folder, the folders above it up to the game's root (the
+// first folder that is not exefs/base/updates/<number>), the root's parent when it is the same
+// name spelled differently ("Yoshi And The ... - Demo/YoshiAndThe..._Demo"), then the game's
+// other version folders (<root>/base, then <root>/updates/<n>, newest first). A sidecar or
+// control.nacp in any of them serves every version of the game. It never climbs above the game,
+// so files in a shared "all my games" folder are not picked up. Sources, first found wins:
+//   title:   control.nacp > game.ini name=/title= > title.txt > the game's folder name
+//   icon:    icon_<language>.dat / any image next to main > icon.png/jpg/jpeg/bmp, icon_*.dat in
+//            the searched folders
+//   version: control.nacp > game.ini version= > RomFS Product tables (else the game list and the
+//            game get "1.0.0", as before)
+// Optional sidecars (hand-made, any text encoding): game.ini (name=, version=), title.txt (first
+// line is the name), icon.png / icon.jpg.
 struct SidecarMetadata {
     std::string name;
     std::string version;
     std::vector<u8> icon;
+    std::string name_source;
+    std::string icon_source;
 };
+
+static bool IsAllDigits(std::string_view text) {
+    return !text.empty() &&
+           std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+// Folder names a dumper uses for a game's parts rather than for the game itself.
+static bool IsGenericDumpFolder(const std::string& folder_name) {
+    const std::string lower = Common::ToLower(folder_name);
+    return lower == "exefs" || lower == "romfs" || lower == "base" || lower == "updates" ||
+           lower == "update" || lower == "dlc" || lower == "control" || IsAllDigits(lower);
+}
+
+// Letters and digits only, lower case: "Yoshi And The Mysterious Book - Demo" and
+// "YoshiAndTheMysteriousBook_Demo" compare equal.
+static std::string NormalizeFolderName(std::string_view text) {
+    std::string out;
+    for (const char c : text) {
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+            out.push_back(c);
+        } else if (c >= 'A' && c <= 'Z') {
+            out.push_back(static_cast<char>(c - 'A' + 'a'));
+        } else if (static_cast<u8>(c) >= 0x80) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// A readable title from a folder name: "_" to spaces, CamelCase split when there are no spaces,
+// and a trailing version ("Mario Kart World 1.0", "Pokopia 2.0.1", "Game v1.2") dropped.
+static std::string FolderNameToTitle(std::string text) {
+    std::replace(text.begin(), text.end(), '_', ' ');
+    if (text.find(' ') == std::string::npos) {
+        std::string split;
+        for (size_t i = 0; i < text.size(); ++i) {
+            const char c = text[i];
+            if (i > 0 && c >= 'A' && c <= 'Z') {
+                const char prev = text[i - 1];
+                const bool prev_lower = prev >= 'a' && prev <= 'z';
+                const bool next_lower =
+                    i + 1 < text.size() && text[i + 1] >= 'a' && text[i + 1] <= 'z';
+                const bool prev_upper = prev >= 'A' && prev <= 'Z';
+                if (prev_lower || (prev_upper && next_lower)) {
+                    split.push_back(' ');
+                }
+            }
+            split.push_back(c);
+        }
+        text = std::move(split);
+    }
+    // Drop a trailing version token made of digits and dots, optionally prefixed by v/V.
+    while (true) {
+        const auto last_space = text.find_last_of(' ');
+        if (last_space == std::string::npos || last_space == 0) {
+            break;
+        }
+        std::string_view token{text};
+        token.remove_prefix(last_space + 1);
+        if (!token.empty() && (token[0] == 'v' || token[0] == 'V')) {
+            token.remove_prefix(1);
+        }
+        const bool is_version =
+            !token.empty() && token.find('.') != std::string_view::npos &&
+            std::all_of(token.begin(), token.end(),
+                        [](char c) { return (c >= '0' && c <= '9') || c == '.'; });
+        if (!is_version) {
+            break;
+        }
+        text.erase(last_space);
+    }
+    // Collapse runs of spaces and trim.
+    std::string out;
+    for (const char c : text) {
+        if (c == ' ' && (out.empty() || out.back() == ' ')) {
+            continue;
+        }
+        out.push_back(c);
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '-')) {
+        out.pop_back();
+    }
+    return out;
+}
+
+struct DumpFolders {
+    std::vector<FileSys::VirtualDir> search; ///< Where sidecars and control.nacp are looked for
+    std::string title;                       ///< Title from the game's folder name
+};
+
+static DumpFolders FindDumpFolders(const FileSys::VirtualDir& file_dir) {
+    DumpFolders result;
+    const auto add = [&result](const FileSys::VirtualDir& dir) {
+        if (dir == nullptr) {
+            return;
+        }
+        const std::string path = dir->GetFullPath();
+        if (std::none_of(result.search.begin(), result.search.end(),
+                         [&path](const FileSys::VirtualDir& d) { return d->GetFullPath() == path; })) {
+            result.search.push_back(dir);
+        }
+    };
+
+    // Climb to the game's root: the first folder that is not a part folder (at most 4 levels).
+    FileSys::VirtualDir root;
+    auto dir = file_dir;
+    for (int level = 0; level < 5 && dir != nullptr; ++level) {
+        add(dir);
+        if (!IsGenericDumpFolder(dir->GetName())) {
+            root = dir;
+            break;
+        }
+        dir = dir->GetParentDirectory();
+    }
+    if (root == nullptr) {
+        // Unusual layout: keep the old behaviour (the folder of main and the two above it).
+        auto up = file_dir;
+        for (int level = 0; level < 3 && up != nullptr; ++level, up = up->GetParentDirectory()) {
+            add(up);
+        }
+        return result;
+    }
+    if (root == file_dir) {
+        // main directly in the game folder: also look one folder up, as before.
+        add(root->GetParentDirectory());
+    }
+
+    std::string title_folder = root->GetName();
+    if (const auto parent = root->GetParentDirectory()) {
+        if (NormalizeFolderName(parent->GetName()) == NormalizeFolderName(root->GetName())) {
+            add(parent);
+            if (parent->GetName().find(' ') != std::string::npos) {
+                title_folder = parent->GetName();
+            }
+        }
+    }
+    result.title = FolderNameToTitle(title_folder);
+
+    // The game's other version folders.
+    for (const auto& sub : root->GetSubdirectories()) {
+        if (Common::ToLower(sub->GetName()) == "base") {
+            add(sub);
+        }
+    }
+    for (const auto& sub : root->GetSubdirectories()) {
+        if (Common::ToLower(sub->GetName()) != "updates") {
+            continue;
+        }
+        auto versions = sub->GetSubdirectories();
+        std::erase_if(versions, [](const FileSys::VirtualDir& d) { return !IsAllDigits(d->GetName()); });
+        std::sort(versions.begin(), versions.end(),
+                  [](const FileSys::VirtualDir& a, const FileSys::VirtualDir& b) {
+                      // Numeric order without parsing (names can be any length).
+                      const auto& x = a->GetName();
+                      const auto& y = b->GetName();
+                      return x.size() != y.size() ? x.size() > y.size() : x > y;
+                  });
+        for (const auto& version : versions) {
+            add(version);
+        }
+    }
+    return result;
+}
 
 static std::string TrimSidecarText(std::string text) {
     if (text.size() >= 3 && static_cast<u8>(text[0]) == 0xEF && static_cast<u8>(text[1]) == 0xBB &&
@@ -198,11 +376,10 @@ static std::string DecodeSidecarText(const std::vector<u8>& bytes) {
     return converted;
 }
 
-static SidecarMetadata ReadSidecarMetadata(const FileSys::VirtualDir& start_dir) {
+static SidecarMetadata ReadSidecarMetadata(const std::vector<FileSys::VirtualDir>& dirs) {
     SidecarMetadata result;
-    auto dir = start_dir;
-    for (int level = 0; level < 3 && dir != nullptr; ++level, dir = dir->GetParentDirectory()) {
-        if (result.name.empty()) {
+    for (const auto& dir : dirs) {
+        if (result.name.empty() || result.version.empty()) {
             if (const auto ini = dir->GetFile("game.ini")) {
                 const std::string text = DecodeSidecarText(ini->ReadAllBytes());
                 size_t pos = 0;
@@ -215,10 +392,11 @@ static SidecarMetadata ReadSidecarMetadata(const FileSys::VirtualDir& start_dir)
                     if (eq == std::string::npos || line.starts_with(';') || line.starts_with('#')) {
                         continue;
                     }
-                    const std::string key = TrimSidecarText(line.substr(0, eq));
+                    const std::string key = Common::ToLower(TrimSidecarText(line.substr(0, eq)));
                     const std::string value = TrimSidecarText(line.substr(eq + 1));
-                    if ((key == "name" || key == "title") && result.name.empty()) {
+                    if ((key == "name" || key == "title") && result.name.empty() && !value.empty()) {
                         result.name = value;
+                        result.name_source = ini->GetFullPath();
                     } else if (key == "version" && result.version.empty()) {
                         result.version = value;
                     }
@@ -229,12 +407,25 @@ static SidecarMetadata ReadSidecarMetadata(const FileSys::VirtualDir& start_dir)
             if (const auto txt = dir->GetFile("title.txt")) {
                 std::string text = TrimSidecarText(DecodeSidecarText(txt->ReadAllBytes()));
                 result.name = TrimSidecarText(text.substr(0, text.find('\n')));
+                if (!result.name.empty()) {
+                    result.name_source = txt->GetFullPath();
+                }
             }
         }
         if (result.icon.empty()) {
-            for (const char* icon_name : {"icon.png", "icon.jpg", "icon.jpeg"}) {
+            for (const char* icon_name : {"icon.png", "icon.jpg", "icon.jpeg", "icon.bmp"}) {
                 if (const auto icon = dir->GetFile(icon_name)) {
                     result.icon = icon->ReadAllBytes();
+                    result.icon_source = icon->GetFullPath();
+                    break;
+                }
+            }
+        }
+        if (result.icon.empty()) {
+            for (const auto& language : FileSys::LANGUAGE_NAMES) {
+                if (const auto icon = dir->GetFile("icon_" + std::string(language) + ".dat")) {
+                    result.icon = icon->ReadAllBytes();
+                    result.icon_source = icon->GetFullPath();
                     break;
                 }
             }
@@ -242,7 +433,6 @@ static SidecarMetadata ReadSidecarMetadata(const FileSys::VirtualDir& start_dir)
     }
     return result;
 }
-
 AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys::VirtualFile file_, bool override_update_)
     : AppLoader(std::move(file_))
     , override_update(override_update_)
@@ -257,30 +447,33 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
             title_id = metadata.GetTitleID();
     }
 
-    // Icon
-    FileSys::VirtualFile icon_file = nullptr;
+    // Metadata, the same way for every loose dump (see FindDumpFolders / ReadSidecarMetadata).
+    const DumpFolders folders = FindDumpFolders(file_dir);
+    std::string icon_source;
+
+    // Icon next to main: icon_<language>.dat, else any png, jpeg, or bmp file.
     for (const auto& language : FileSys::LANGUAGE_NAMES) {
-        icon_file = file_dir->GetFile("icon_" + std::string(language) + ".dat");
-        if (icon_file != nullptr) {
+        if (const auto icon_file = file_dir->GetFile("icon_" + std::string(language) + ".dat")) {
             icon_data = icon_file->ReadAllBytes();
+            icon_source = icon_file->GetFullPath();
             break;
         }
     }
-
     if (icon_data.empty()) {
-        // Any png, jpeg, or bmp file
         const auto& files = file_dir->GetFiles();
         const auto icon_iter =
             std::find_if(files.begin(), files.end(), [](const FileSys::VirtualFile& f) {
                 return f->GetExtension() == "png" || f->GetExtension() == "jpg" ||
                        f->GetExtension() == "bmp" || f->GetExtension() == "jpeg";
             });
-        if (icon_iter != files.end())
+        if (icon_iter != files.end()) {
             icon_data = (*icon_iter)->ReadAllBytes();
+            icon_source = (*icon_iter)->GetFullPath();
+        }
     }
 
-    // Metadata: control.nacp (or any .nacp) next to main, else a control.nacp in the folders above
-    // it (dumps keep the title's or the update's control data at their root).
+    // Control data: control.nacp (or any .nacp) next to main, else a control.nacp in any searched
+    // folder (dumps keep the title's or the update's control data at their root).
     FileSys::VirtualFile nacp_file = file_dir->GetFile("control.nacp");
     if (nacp_file == nullptr) {
         const auto& files = file_dir->GetFiles();
@@ -290,16 +483,20 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
         if (nacp_iter != files.end())
             nacp_file = *nacp_iter;
     }
-
-    auto parent = file_dir->GetParentDirectory();
-    for (int level = 0; level < 3 && nacp_file == nullptr && parent != nullptr; ++level) {
-        nacp_file = parent->GetFile("control.nacp");
-        parent = parent->GetParentDirectory();
+    for (const auto& dir : folders.search) {
+        if (nacp_file != nullptr) {
+            break;
+        }
+        nacp_file = dir->GetFile("control.nacp");
     }
 
+    std::string title_source;
     if (nacp_file != nullptr) {
         control.emplace(nacp_file);
         name = control->GetApplicationName();
+        if (!name.empty()) {
+            title_source = nacp_file->GetFullPath();
+        }
     }
 
     // The loose RomFS beside the exefs folder (as ReadRomFS finds it).
@@ -307,20 +504,34 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
         romfs_version = RomFSProductVersion(title_dir->GetSubdirectory("romfs"));
     }
 
-    // Sidecar name/version/icon for dumps without control data (see ReadSidecarMetadata).
-    if (name.empty() || icon_data.empty()) {
-        auto sidecar = ReadSidecarMetadata(file_dir);
-        if (name.empty() && !sidecar.name.empty()) {
-            name = std::move(sidecar.name);
-            LOG_INFO(Loader, "Using sidecar title \"{}\" for {}", name, file_dir->GetName());
-        }
-        if (icon_data.empty() && !sidecar.icon.empty()) {
-            icon_data = std::move(sidecar.icon);
-        }
-        sidecar_version = std::move(sidecar.version);
+    // Sidecar name/version/icon for dumps without (complete) control data.
+    auto sidecar = ReadSidecarMetadata(folders.search);
+    if (name.empty() && !sidecar.name.empty()) {
+        name = std::move(sidecar.name);
+        title_source = std::move(sidecar.name_source);
     }
-}
+    if (icon_data.empty() && !sidecar.icon.empty()) {
+        icon_data = std::move(sidecar.icon);
+        icon_source = std::move(sidecar.icon_source);
+    }
+    sidecar_version = std::move(sidecar.version);
 
+    // Last resort for the title: the game's folder name, so no dump shows up untitled.
+    if (name.empty() && !folders.title.empty()) {
+        name = folders.title;
+        title_source = "folder name";
+    }
+
+    std::string version;
+    void(ReadDisplayVersion(version));
+    LOG_INFO(Loader,
+             "Dump metadata for {:016X}: title \"{}\" ({}), icon {} ({}), version {} ({} folders "
+             "searched)",
+             title_id, name, title_source.empty() ? "none" : title_source,
+             icon_data.empty() ? "none" : fmt::format("{} bytes", icon_data.size()),
+             icon_source.empty() ? "none - add icon.jpg next to exefs" : icon_source,
+             version.empty() ? "unknown (1.0.0)" : version, folders.search.size());
+}
 AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(
     FileSys::VirtualDir directory, bool override_update_)
     : AppLoader(directory->GetFile("main"))

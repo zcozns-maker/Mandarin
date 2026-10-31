@@ -84,7 +84,8 @@ public:
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
                      const QString& game_name, const QString& game_type, u64 program_id,
-                     u64 play_time, const QString& patch_versions) {
+                     u64 play_time, const QString& patch_versions,
+                     const QString& display_version = {}) {
         setData(type(), TypeRole);
         setData(game_path, FullPathRole);
         setData(game_name, TitleRole);
@@ -97,7 +98,7 @@ public:
                                     PlayTime::PlayTimeManager::GetReadablePlayTime(play_time)))
                           : QObject::tr("Never Played");
 
-        const auto enabled_update = [patch_versions]() -> QString {
+        const auto enabled_update = [patch_versions, display_version]() -> QString {
             const QStringList lines = patch_versions.split(QLatin1Char('\n'));
             const QRegularExpression regex{QStringLiteral(R"(^Update \(([0-9\.]+)\))")};
             for (const QString& line : std::as_const(lines)) {
@@ -105,7 +106,10 @@ public:
                 if (match.hasMatch() && match.hasCaptured(1))
                     return QObject::tr("Version: %1").arg(match.captured(1));
             }
-            return QObject::tr("Version: 1.0.0");
+            // No installed update: the game's own version (its control data, or for a loose
+            // dump the same lookup the emulated game gets), else 1.0.0.
+            return QObject::tr("Version: %1")
+                .arg(display_version.isEmpty() ? QStringLiteral("1.0.0") : display_version);
         }();
 
         const auto tooltip = QStringLiteral("%1\n%2").arg(readable_play_time, enabled_update);

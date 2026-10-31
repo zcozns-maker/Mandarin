@@ -212,10 +212,18 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
             return FormatPatchNameVersions(patch, loader, loader.IsRomFSUpdatable());
         });
 
+    // Same version source for every game: the loader's display version (control data, or a
+    // loose dump's game.ini / RomFS version).
+    std::string display_version;
+    if (loader.ReadDisplayVersion(display_version) != Loader::ResultStatus::Success) {
+        display_version.clear();
+    }
+
     u64 play_time = play_time_manager.GetPlayTime(program_id);
     return QList<QStandardItem*>{
         new GameListItemPath(FormatGameName(path), icon, QString::fromStdString(name),
-                             file_type_string, program_id, play_time, patch_versions),
+                             file_type_string, program_id, play_time, patch_versions,
+                             QString::fromStdString(display_version)),
         new GameListItem(file_type_string),
         new GameListItemSize(size),
         new GameListItemPlayTime(play_time),
