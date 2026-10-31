@@ -47241,7 +47241,7 @@ index ed4675e..8603c71 100644
  
  void MaxwellDMA::ReleaseSemaphore() {
 diff --git a/src/video_core/engines/puller.cpp b/src/video_core/engines/puller.cpp
-index 0b05d31..b8dae87 100644
+index 0b05d31..8971a54 100644
 --- a/src/video_core/engines/puller.cpp
 +++ b/src/video_core/engines/puller.cpp
 @@ -4,6 +4,9 @@
@@ -47384,7 +47384,7 @@ index 0b05d31..b8dae87 100644
          break;
      default:
          UNIMPLEMENTED_MSG("Unimplemented operation {}", regs.fence_action.op.Value());
-@@ -79,16 +165,117 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
+@@ -79,16 +165,120 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
      }
  }
  
@@ -47437,6 +47437,9 @@ index 0b05d31..b8dae87 100644
 +        OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, properties, payload] {
 +            rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
 +        });
++        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
++            split.NoteRelease(sequence_address);
++        }
      } else {
 +        // An acquire reads what earlier work released: let the split's back thread finish it.
 +        // A GEQUAL acquire that guest memory already meets needs no wait: the counters only
@@ -47504,7 +47507,7 @@ index 0b05d31..b8dae87 100644
              regs.acquire_source = true;
              regs.acquire_value = regs.semaphore_sequence;
              if (op == GpuSemaphoreOperation::AcquireEqual) {
-@@ -120,10 +307,17 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
+@@ -120,10 +310,17 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
  void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
      const GPUVAddr sequence_address{regs.semaphore_address.SemaphoreAddress()};
      const u32 payload = regs.semaphore_release;
@@ -47523,7 +47526,7 @@ index 0b05d31..b8dae87 100644
      u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
      const auto value = regs.semaphore_acquire;
      while (word != value) {
-@@ -155,13 +349,13 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
+@@ -155,13 +352,13 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
      case BufferMethods::WrcacheFlush:
          break;
      case BufferMethods::RefCnt:
@@ -47539,7 +47542,7 @@ index 0b05d31..b8dae87 100644
          break;
      case BufferMethods::SemaphoreOperation: {
          ProcessSemaphoreTriggerMethod(dma_pusher);
-@@ -172,17 +366,22 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
+@@ -172,17 +369,22 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
          break;
      }
      case BufferMethods::MemOpA: {
@@ -47565,7 +47568,7 @@ index 0b05d31..b8dae87 100644
          break;
      }
      case BufferMethods::SemaphoreAcquire: {
-@@ -211,12 +410,19 @@ void Puller::CallEngineMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
+@@ -211,12 +413,19 @@ void Puller::CallEngineMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
      case EngineID::FERMI_TWOD_A:
          dma_pusher.channel_state.payload->fermi_2d.CallMethod(dma_pusher.system, method_call.method, method_call.argument, method_call.IsLastCall());
          break;
@@ -47585,7 +47588,7 @@ index 0b05d31..b8dae87 100644
      case EngineID::MAXWELL_DMA_COPY_A:
          dma_pusher.channel_state.payload->maxwell_dma.CallMethod(dma_pusher.system, method_call.method, method_call.argument, method_call.IsLastCall());
          break;
-@@ -239,12 +445,19 @@ void Puller::CallEngineMultiMethod(DmaPusher& dma_pusher, u32 method, u32 subcha
+@@ -239,12 +448,19 @@ void Puller::CallEngineMultiMethod(DmaPusher& dma_pusher, u32 method, u32 subcha
      case EngineID::FERMI_TWOD_A:
          dma_pusher.channel_state.payload->fermi_2d.CallMultiMethod(dma_pusher.system, method, base_start, amount, methods_pending);
          break;
@@ -48031,10 +48034,10 @@ index 974d214..47f50cd 100644
  
 diff --git a/src/video_core/gpu_split.cpp b/src/video_core/gpu_split.cpp
 new file mode 100644
-index 0000000..9ce9276
+index 0000000..a80c5dd
 --- /dev/null
 +++ b/src/video_core/gpu_split.cpp
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,398 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -48241,6 +48244,26 @@ index 0000000..9ce9276
 +    }
 +}
 +
++void GpuSplit::AwaitReleases(GPUVAddr address, u64 size) {
++    if (sent_releases.empty()) {
++        return;
++    }
++    const u64 done = consumed.load(std::memory_order_acquire);
++    bool wait = false;
++    for (auto it = sent_releases.begin(); it != sent_releases.end();) {
++        if (it->second <= done) {
++            it = sent_releases.erase(it);
++            continue;
++        }
++        wait |= it->first >= address && it->first < address + size;
++        ++it;
++    }
++    if (wait) {
++        Drain();
++        sent_releases.clear();
++    }
++}
++
 +void GpuSplit::Drain() {
 +    consumed_cache = consumed.load(std::memory_order_acquire);
 +    if (consumed_cache == write_position) {
@@ -48415,10 +48438,10 @@ index 0000000..9ce9276
 +} // namespace VideoCommon
 diff --git a/src/video_core/gpu_split.h b/src/video_core/gpu_split.h
 new file mode 100644
-index 0000000..cf2adde
+index 0000000..b8fd99b
 --- /dev/null
 +++ b/src/video_core/gpu_split.h
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,219 @@
 +// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
@@ -48430,6 +48453,7 @@ index 0000000..cf2adde
 +#include <memory>
 +#include <thread>
 +#include <type_traits>
++#include <unordered_map>
 +
 +#include "common/common_types.h"
 +
@@ -48543,6 +48567,14 @@ index 0000000..cf2adde
 +    static inline bool check_owner{};
 +    static void CheckOwner(const char* where);
 +
++    /// A semaphore release sent to the back at `address` (front thread only).
++    void NoteRelease(GPUVAddr address) {
++        sent_releases.insert_or_assign(address, write_position);
++    }
++    /// Waits for the back to run the releases sent to [address, address + size): macros on the
++    /// front read memory that the GPU would have written by then (front thread only).
++    void AwaitReleases(GPUVAddr address, u64 size);
++
 +    /// Makes what was sent visible to the back.
 +    void Publish();
 +    /// Waits until the back executed everything sent so far.
@@ -48611,6 +48643,8 @@ index 0000000..cf2adde
 +    Tegra::Engines::EngineInterface* front_engine{};
 +    void (*front_after_method)(void*){};
 +    void* front_after_context{};
++    /// Semaphore releases sent to the back: address, write position after them.
++    std::unordered_map<GPUVAddr, u64> sent_releases;
 +
 +    // Back side.
 +    Tegra::Engines::EngineInterface* back_engine{};
@@ -49325,7 +49359,7 @@ index e084837..28b1dcf 100644
  
  uvec4 ReadTexel(uint offset) {
 diff --git a/src/video_core/macro.cpp b/src/video_core/macro.cpp
-index 86f528a..48fa89a 100644
+index 86f528a..6cf07cf 100644
 --- a/src/video_core/macro.cpp
 +++ b/src/video_core/macro.cpp
 @@ -4,6 +4,10 @@
@@ -49347,15 +49381,16 @@ index 86f528a..48fa89a 100644
  #endif
  
  #include "common/assert.h"
-@@ -25,6 +30,7 @@
+@@ -25,6 +30,8 @@
  #include "video_core/engines/maxwell_3d.h"
  #include "video_core/engines/maxwell_3d.h"
  #include "video_core/dirty_flags.h"
 +#include "video_core/memory_manager.h"
++#include "video_core/gpu_split.h"
  #include "video_core/rasterizer_interface.h"
  #include "video_core/macro.h"
  
-@@ -32,6 +38,7 @@
+@@ -32,6 +39,7 @@
  #include "common/bit_field.h"
  #include "common/logging.h"
  #include "video_core/engines/maxwell_3d.h"
@@ -49363,7 +49398,7 @@ index 86f528a..48fa89a 100644
  
  namespace Tegra {
  
-@@ -1339,6 +1346,212 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
+@@ -1339,6 +1347,229 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
  
  void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
                            std::span<const u32> parameters) {
@@ -49417,7 +49452,7 @@ index 86f528a..48fa89a 100644
 +        const auto emit = [&](u32 address, u32 value) {
 +                if (address >= 0xe00) return false;
 +                if (address == 0x556) {
-+                    // SET_RENDER_ENABLE_OVERRIDE: 0 use the render-enable condition, 1 always,
++                    // SET_RENDER_ENABLE_C (render_enable.mode): 0 never, 1 always, 2-4 conditional.
 +                    // 2 never. Log a histogram every 20000 macro writes (pop-in diagnostics).
 +                    static std::array<u64, 4> modes{};
 +                    static u64 enable_writes{};
@@ -49442,6 +49477,23 @@ index 86f528a..48fa89a 100644
 +                                            maxwell3d.GetRegisterValue(MemAddressB);
 +                    auto& memory = maxwell3d.GetMemoryManager();
 +                    const u32 ram = maxwell3d.GetRegisterValue(DataRamAddress);
++                    // The GPU reads what the semaphore releases before it wrote (title 4 keeps
++                    // "clear pending" flags that way): wait for the back to run those sent to
++                    // the words, then take releases that still wait for the host GPU (accurate
++                    // GPU mode writes them from a fence).
++                    const u64 dma_bytes = u64{std::min<u32>(value, 0x1000)} * 4;
++                    if (auto& split = VideoCommon::GpuSplit::Get(); split.Active() && split.FrontMacros()) {
++                        split.AwaitReleases(source, dma_bytes);
++                    }
++                    const auto read_word = [&](GPUVAddr address) {
++                        if (const auto device = dma_bytes <= 256 ? memory.GpuToCpuAddress(address)
++                                                                 : std::nullopt) {
++                            if (const auto pending = maxwell3d.Rasterizer().PendingSemaphoreRelease(*device)) {
++                                return *pending;
++                            }
++                        }
++                        return memory.Read<u32>(address);
++                    };
 +                    // The words may have just been written by the GPU (e.g. indirect draw arguments
 +                    // from a culling dispatch) and still be only in host buffers: flush them first,
 +                    // or the macro draws with an older frame's arguments (objects pop in and out).
@@ -49470,7 +49522,7 @@ index 86f528a..48fa89a 100644
 +                                 address == DmaReadFifoed ? " fifoed" : "", method, source, value, fmt::join(words, ","));
 +                    }
 +                    for (u32 i = 0; i < std::min<u32>(value, 0x1000); ++i) {
-+                        const u32 word = memory.Read<u32>(source + u64{i} * 4);
++                        const u32 word = read_word(source + u64{i} * 4);
 +                        if (address == DmaReadFifoed) {
 +                            fifo.push_back(word);
 +                        } else if (ram + i < native_interpreter.active_dram->size()) {
@@ -57131,7 +57183,7 @@ index 0000000..52a48e8
 +
 +} // namespace VideoCommon
 diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
-index e92e54f..8815802 100644
+index e92e54f..693849a 100644
 --- a/src/video_core/texture_cache/texture_cache.h
 +++ b/src/video_core/texture_cache/texture_cache.h
 @@ -6,7 +6,14 @@
@@ -57221,7 +57273,7 @@ index e92e54f..8815802 100644
          UnregisterImage(image_id);
          DeleteImage(image_id, image.scale_tick > frame_tick + 5);
          if (aggressive_mode && total_used_memory < critical_memory) {
-@@ -167,12 +210,129 @@ void TextureCache<P>::RunGarbageCollector() {
+@@ -167,12 +210,133 @@ void TextureCache<P>::RunGarbageCollector() {
      }
  }
  
@@ -57266,14 +57318,18 @@ index e92e54f..8815802 100644
 +        // VRAM (another game: 7.0 -> 6.4 GB), and collecting only past it means the driver pages
 +        // textures out. It is also the room to use: Eden's device memory figure is capped near
 +        // 7 GB, which on a 12 GB card (11.2 GB budget) kept title 1 evicting textures with 3 GB
-+        // unused. EDEN_NX2_TC_*_MIB overrides still win.
++        // unused. Both thresholds stay under it with a margin (1/8 of it, 768 MiB to 1 GiB): past
++        // it allocations fail and images end up unbacked, and Windows shrinks the budget as the
++        // card fills (16 GB card: 13.5 GB left mid-race), hence the re-read every 30 frames.
++        // EDEN_NX2_TC_*_MIB overrides still win.
 +        if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
-+            if (native_thresholds_applied && budget_check_frames++ % 60 == 0) {
++            if (native_thresholds_applied && budget_check_frames++ % 30 == 0) {
 +                const u64 budget = runtime.GetDeviceMemoryBudget();
 +                if (budget > 2_GiB) {
 +                    const u64 old_critical = critical_memory;
-+                    critical_memory = budget - 768_MiB;
-+                    expected_memory = budget - 1536_MiB;
++                    const u64 margin = std::clamp<u64>(budget / 8, 768_MiB, 1_GiB);
++                    critical_memory = budget - margin;
++                    expected_memory = budget - 2 * margin;
 +                    // Log only real changes (the budget moves by a few MiB all the time).
 +                    const u64 change = critical_memory > old_critical
 +                                           ? critical_memory - old_critical
@@ -57351,7 +57407,7 @@ index e92e54f..8815802 100644
      if (total_used_memory > minimum_memory) {
          RunGarbageCollector();
      }
-@@ -217,6 +377,7 @@ void TextureCache<P>::MarkModification(ImageId id) noexcept {
+@@ -217,6 +381,7 @@ void TextureCache<P>::MarkModification(ImageId id) noexcept {
  
  template <class P>
  void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist) {
@@ -57359,7 +57415,7 @@ index e92e54f..8815802 100644
      bool has_blacklisted = false;
      do {
          has_deleted_images = false;
-@@ -225,6 +386,13 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
+@@ -225,6 +390,13 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
          }
          for (ImageViewInOut& view : views) {
              view.id = VisitImageView(view.index, compute);
@@ -57373,7 +57429,7 @@ index e92e54f..8815802 100644
              if (blacklist) {
                  if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                      const ImageViewBase& image_view = slot_image_views[view.id];
-@@ -315,6 +483,7 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
+@@ -315,6 +487,7 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
      }
      auto const map_index = index | (compute ? Common::SlotId::TAGGED_VALUE : 0);
      auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
@@ -57381,7 +57437,7 @@ index e92e54f..8815802 100644
      if (is_new) {
          auto const id = FindSampler(descriptor, compute);
          channel_state->sampler_ids.insert_or_assign(map_index, id);
-@@ -584,10 +753,19 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
+@@ -584,10 +757,19 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
  
  template <class P>
  void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
@@ -57402,7 +57458,7 @@ index e92e54f..8815802 100644
          image.flags |= ImageFlagBits::CpuModified;
          if (True(image.flags & ImageFlagBits::Tracked)) {
              UntrackImage(image, image_id);
-@@ -597,7 +775,7 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
+@@ -597,7 +779,7 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
  
  template <class P>
  bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
@@ -57411,7 +57467,7 @@ index e92e54f..8815802 100644
          return false;
      }
      if (image.info.num_samples == 1) {
-@@ -610,6 +788,74 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
+@@ -610,6 +792,74 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
      }
  }
  
@@ -57486,7 +57542,7 @@ index e92e54f..8815802 100644
  template <class P>
  void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
      boost::container::small_vector<ImageId, 16> images;
-@@ -684,16 +930,29 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
+@@ -684,16 +934,29 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
                              [&](ImageId id, Image&) { deleted_images.push_back(id); });
      for (const ImageId id : deleted_images) {
          Image& image = slot_images[id];
@@ -57516,7 +57572,7 @@ index e92e54f..8815802 100644
      }
  }
  
-@@ -714,6 +973,14 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
+@@ -714,6 +977,14 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
  
      Image& dst_image = slot_images[dst_id];
      Image& src_image = slot_images[src_id];
@@ -57531,7 +57587,7 @@ index e92e54f..8815802 100644
      bool is_src_rescaled = True(src_image.flags & ImageFlagBits::Rescaled);
      bool is_dst_rescaled = True(dst_image.flags & ImageFlagBits::Rescaled);
  
-@@ -803,6 +1070,17 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
+@@ -803,6 +1074,17 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
      if (it == page_table.end()) {
          return {};
      }
@@ -57549,7 +57605,7 @@ index e92e54f..8815802 100644
      const auto& image_map_ids = it->second;
      boost::container::small_vector<ImageId, 4> valid_image_ids;
      for (const ImageMapId map_id : image_map_ids) {
-@@ -814,20 +1092,17 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
+@@ -814,20 +1096,17 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
          if (image.image_view_ids.empty()) {
              continue;
          }
@@ -57578,7 +57634,7 @@ index e92e54f..8815802 100644
      const auto GetImageViewForFramebuffer = [&](ImageId image_id) {
          ImageViewInfo info{ImageViewType::e2D, view_format};
          if (config.blending == Tegra::BlendMode::Opaque) {
-@@ -859,6 +1134,11 @@ bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
+@@ -859,6 +1138,11 @@ bool TextureCache<P>::HasUncommittedFlushes() const noexcept {
      return !uncommitted_downloads.empty();
  }
  
@@ -57590,7 +57646,7 @@ index e92e54f..8815802 100644
  template <class P>
  bool TextureCache<P>::ShouldWaitAsyncFlushes() const noexcept {
      return !committed_downloads.empty() && !committed_downloads.front().empty();
-@@ -869,6 +1149,7 @@ void TextureCache<P>::CommitAsyncFlushes() {
+@@ -869,6 +1153,7 @@ void TextureCache<P>::CommitAsyncFlushes() {
      // This is intentionally passing the value by copy
      if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
          auto& download_ids = uncommitted_downloads;
@@ -57598,7 +57654,7 @@ index e92e54f..8815802 100644
          if (download_ids.empty()) {
              committed_downloads.emplace_back(std::move(uncommitted_downloads));
              uncommitted_downloads.clear();
-@@ -882,17 +1163,32 @@ void TextureCache<P>::CommitAsyncFlushes() {
+@@ -882,17 +1167,32 @@ void TextureCache<P>::CommitAsyncFlushes() {
          for (PendingDownload& download_info : download_ids) {
              if (download_info.is_swizzle) {
                  total_size_bytes +=
@@ -57633,7 +57689,7 @@ index e92e54f..8815802 100644
                      const auto copies = FullDownloadCopies(image.info);
                      image.DownloadMemory(download_map, copies);
                      download_map.offset += Common::AlignUp(image.unswizzled_size_bytes, 64);
-@@ -925,7 +1221,7 @@ void TextureCache<P>::PopAsyncFlushes() {
+@@ -925,7 +1225,7 @@ void TextureCache<P>::PopAsyncFlushes() {
              auto& download_info = download_ids[i - 1];
              auto& download_buffer = download_map[download_info.async_buffer_id];
              if (download_info.is_swizzle) {
@@ -57642,7 +57698,7 @@ index e92e54f..8815802 100644
                  const auto copies = FullDownloadCopies(image.info);
                  download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                  std::span<u8> download_span =
-@@ -954,7 +1250,7 @@ void TextureCache<P>::PopAsyncFlushes() {
+@@ -954,7 +1254,7 @@ void TextureCache<P>::PopAsyncFlushes() {
          size_t total_size_bytes = 0;
          for (const PendingDownload& download_info : download_ids) {
              if (download_info.is_swizzle) {
@@ -57651,7 +57707,7 @@ index e92e54f..8815802 100644
              }
          }
          auto download_map = runtime.DownloadStagingBuffer(total_size_bytes);
-@@ -963,7 +1259,7 @@ void TextureCache<P>::PopAsyncFlushes() {
+@@ -963,7 +1263,7 @@ void TextureCache<P>::PopAsyncFlushes() {
              if (!download_info.is_swizzle) {
                  continue;
              }
@@ -57660,7 +57716,7 @@ index e92e54f..8815802 100644
              const auto copies = FullDownloadCopies(image.info);
              image.DownloadMemory(download_map, copies);
              download_map.offset += image.unswizzled_size_bytes;
-@@ -976,7 +1272,7 @@ void TextureCache<P>::PopAsyncFlushes() {
+@@ -976,7 +1276,7 @@ void TextureCache<P>::PopAsyncFlushes() {
              if (!download_info.is_swizzle) {
                  continue;
              }
@@ -57669,7 +57725,7 @@ index e92e54f..8815802 100644
              const auto copies = FullDownloadCopies(image.info);
              SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
              download_map.offset += image.unswizzled_size_bytes;
-@@ -1117,10 +1413,54 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
+@@ -1117,10 +1417,54 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
          // Only upload modified images
          return;
      }
@@ -57725,7 +57781,7 @@ index e92e54f..8815802 100644
  
      if (image.info.num_samples > 1 && !runtime.CanUploadMSAA()) {
          LOG_WARNING(HW_GPU, "MSAA image uploads are not implemented");
-@@ -1145,9 +1485,118 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
+@@ -1145,9 +1489,118 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
          QueueAsyncUnswizzle(image, image_id);
          return;
      }
@@ -57847,7 +57903,7 @@ index e92e54f..8815802 100644
  }
  
  template <class P>
-@@ -1156,6 +1605,24 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+@@ -1156,6 +1609,24 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
      const std::span<u8> mapped_span = staging.mapped_span;
      const GPUVAddr gpu_addr = image.gpu_addr;
  
@@ -57872,7 +57928,7 @@ index e92e54f..8815802 100644
      if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
          gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
                                VideoCommon::CacheType::NoTextureCache);
-@@ -1178,8 +1645,42 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+@@ -1178,8 +1649,42 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
  }
  
  template <class P>
@@ -57916,7 +57972,7 @@ index e92e54f..8815802 100644
      if (info.type == ImageType::Buffer) {
          const ImageViewInfo view_info(config, 0);
          return slot_image_views.insert(runtime, info, view_info, config.Address());
-@@ -1191,6 +1692,18 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& config) {
+@@ -1191,6 +1696,18 @@ ImageViewId TextureCache<P>::CreateImageView(const TICEntry& config) {
          return NULL_IMAGE_VIEW_ID;
      }
      ImageBase& image = slot_images[image_id];
@@ -57935,7 +57991,7 @@ index e92e54f..8815802 100644
      const SubresourceBase base = image.TryFindBase(config.Address()).value();
      ASSERT(base.level == 0);
      const ImageViewInfo view_info(config, base.layer);
-@@ -1213,12 +1726,9 @@ ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_a
+@@ -1213,12 +1730,9 @@ ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_a
  template <class P>
  ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                     RelaxedOptions options) {
@@ -57950,7 +58006,30 @@ index e92e54f..8815802 100644
      }
      const bool broken_views =
          runtime.HasBrokenTextureViewFormats() || True(options & RelaxedOptions::ForceBrokenViews);
-@@ -1344,9 +1854,10 @@ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
+@@ -1328,6 +1842,22 @@ void TextureCache<P>::InvalidateScale(Image& image) {
+     has_deleted_images = true;
+ }
+ 
++template <class P>
++u64 TextureCache<P>::ImageMemoryBytes(const ImageBase& image) const {
++    // An unbacked image has no device memory: counted at its full size (GBs for sparse virtual
++    // textures), deleting it would look to the collector like freeing that much.
++    if (True(image.flags & ImageFlagBits::Unbacked)) {
++        return 0;
++    }
++    u64 tentative_size = (std::max)(image.guest_size_bytes, image.unswizzled_size_bytes);
++    if ((IsPixelFormatASTC(image.info.format) &&
++         True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
++        True(image.flags & ImageFlagBits::Converted)) {
++        tentative_size = TranscodedAstcSize(tentative_size, image.info.format);
++    }
++    return Common::AlignUp(tentative_size, 1024);
++}
++
+ template <class P>
+ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
+     const u64 scale_up = static_cast<u64>(Settings::values.resolution_info.up_scale *
+@@ -1344,9 +1874,10 @@ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
  template <class P>
  void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
      UNIMPLEMENTED_IF(False(image.flags & ImageFlagBits::Converted));
@@ -57962,7 +58041,7 @@ index e92e54f..8815802 100644
      auto decode = std::make_unique<AsyncDecodeContext>();
      auto* decode_ptr = decode.get();
      decode->image_id = image_id;
-@@ -1356,6 +1867,18 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
+@@ -1356,6 +1887,18 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
      Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
      auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
      const size_t out_size = MapSizeBytes(image);
@@ -57981,7 +58060,7 @@ index e92e54f..8815802 100644
  
      auto func = [out_size, copies, info = image.info,
                   input = std::move(local_unswizzle_data_buffer),
-@@ -1392,12 +1915,26 @@ void TextureCache<P>::TickAsyncDecode() {
+@@ -1392,12 +1935,26 @@ void TextureCache<P>::TickAsyncDecode() {
      auto i = async_decodes.begin();
      while (i != async_decodes.end()) {
          auto* async_decode = i->get();
@@ -58011,7 +58090,7 @@ index e92e54f..8815802 100644
          auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
          std::memcpy(staging.mapped_span.data(), async_decode->decoded_data.data(),
                      async_decode->decoded_data.size());
-@@ -1512,21 +2049,37 @@ bool TextureCache<P>::ScaleDown(Image& image) {
+@@ -1512,21 +2069,37 @@ bool TextureCache<P>::ScaleDown(Image& image) {
      return true;
  }
  
@@ -58058,7 +58137,7 @@ index e92e54f..8815802 100644
      const Image& image = slot_images[image_id];
      // Using "image.gpu_addr" instead of "gpu_addr" is important because it might be different
      const auto [it, is_new] = image_allocs_table.try_emplace(image.gpu_addr);
-@@ -1634,10 +2187,44 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+@@ -1634,10 +2207,44 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
          }
      }
  
@@ -58103,7 +58182,7 @@ index e92e54f..8815802 100644
  
      if (!gpu_memory->IsContinuousRange(new_image.gpu_addr, new_image.guest_size_bytes) &&
          new_info.is_sparse) {
-@@ -1647,7 +2234,11 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
+@@ -1647,7 +2254,11 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
      for (const ImageId overlap_id : join_ignore_textures) {
          Image& overlap = slot_images[overlap_id];
          if (True(overlap.flags & ImageFlagBits::GpuModified)) {
@@ -58116,7 +58195,7 @@ index e92e54f..8815802 100644
          }
          if (True(overlap.flags & ImageFlagBits::Tracked)) {
              UntrackImage(overlap, overlap_id);
-@@ -1833,12 +2424,9 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
+@@ -1833,12 +2444,9 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
  
  template <class P>
  ImageId TextureCache<P>::FindDMAImage(const ImageInfo& info, GPUVAddr gpu_addr) {
@@ -58131,7 +58210,7 @@ index e92e54f..8815802 100644
      }
      ImageId image_id{};
      boost::container::small_vector<ImageId, 8> image_ids;
-@@ -1859,6 +2447,13 @@ ImageId TextureCache<P>::FindDMAImage(const ImageInfo& info, GPUVAddr gpu_addr)
+@@ -1859,6 +2467,13 @@ ImageId TextureCache<P>::FindDMAImage(const ImageInfo& info, GPUVAddr gpu_addr)
                  return true;
              }
          } else if (IsSubCopy(info, existing_image, gpu_addr)) {
@@ -58145,7 +58224,7 @@ index e92e54f..8815802 100644
              image_id = existing_image_id;
              image_ids.push_back(existing_image_id);
              return true;
-@@ -1954,6 +2549,13 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
+@@ -1954,6 +2569,13 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
          base = image.TryFindBase(gpu_addr).value();
      }
      const s32 layers = image.info.type == ImageType::e3D ? info.size.depth : info.resources.layers;
@@ -58159,7 +58238,7 @@ index e92e54f..8815802 100644
      const SubresourceRange range{
          .base = base,
          .extent = {.levels = 1, .layers = layers},
-@@ -2136,6 +2738,13 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
+@@ -2136,6 +2758,13 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
      if (const ImageViewId image_view_id = image.FindView(info); image_view_id) {
          return image_view_id;
      }
@@ -58173,7 +58252,22 @@ index e92e54f..8815802 100644
      const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
      image.InsertView(info, image_view_id);
      return image_view_id;
-@@ -2291,9 +2900,185 @@ void TextureCache<P>::TrackImage(ImageBase& image, ImageId image_id) {
+@@ -2147,13 +2776,7 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
+     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
+                "Trying to register an already registered image");
+     image.flags |= ImageFlagBits::Registered;
+-    u64 tentative_size = (std::max)(image.guest_size_bytes, image.unswizzled_size_bytes);
+-    if ((IsPixelFormatASTC(image.info.format) &&
+-         True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
+-        True(image.flags & ImageFlagBits::Converted)) {
+-        tentative_size = TranscodedAstcSize(tentative_size, image.info.format);
+-    }
+-    total_used_memory += Common::AlignUp(tentative_size, 1024);
++    total_used_memory += ImageMemoryBytes(image);
+     image.lru_index = lru_cache.Insert(image_id, frame_tick);
+ 
+     ForEachGPUPage(image.gpu_addr, image.guest_size_bytes, [this, image_id](u64 page) {
+@@ -2291,9 +2914,185 @@ void TextureCache<P>::TrackImage(ImageBase& image, ImageId image_id) {
                           });
  }
  
@@ -58359,7 +58453,7 @@ index e92e54f..8815802 100644
      image.flags &= ~ImageFlagBits::Tracked;
      if (False(image.flags & ImageFlagBits::Sparse)) {
          if (image.cpu_addr < ~(1ULL << 40)) {
-@@ -2316,6 +3101,24 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
+@@ -2316,16 +3115,29 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
  template <class P>
  void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
      ImageBase& image = slot_images[image_id];
@@ -58384,7 +58478,19 @@ index e92e54f..8815802 100644
      if (image.HasScaled()) {
          total_used_memory -= GetScaledImageSizeBytes(image);
      }
-@@ -2385,7 +3188,11 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
+-    u64 tentative_size = (std::max)(image.guest_size_bytes, image.unswizzled_size_bytes);
+-    if ((IsPixelFormatASTC(image.info.format) &&
+-         True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
+-        True(image.flags & ImageFlagBits::Converted)) {
+-        tentative_size = TranscodedAstcSize(tentative_size, image.info.format);
+-    }
+-    total_used_memory -= Common::AlignUp(tentative_size, 1024);
++    // TickFrame sets the total from the driver, which can be under the sum of these estimates.
++    total_used_memory -= (std::min)(total_used_memory, ImageMemoryBytes(image));
+     const GPUVAddr gpu_addr = image.gpu_addr;
+     const auto alloc_it = image_allocs_table.find(gpu_addr);
+     if (alloc_it == image_allocs_table.end()) {
+@@ -2385,7 +3197,11 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
          }
          slot_image_views.erase(image_view_id);
      }
@@ -58397,7 +58503,7 @@ index e92e54f..8815802 100644
          sentenced_images.Push(std::move(slot_images[image_id]));
      }
      slot_images.erase(image_id);
-@@ -2504,6 +3311,8 @@ template <class P>
+@@ -2504,6 +3320,8 @@ template <class P>
  void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool invalidate) {
      Image& image = slot_images[image_id];
      if (invalidate) {
@@ -58406,7 +58512,7 @@ index e92e54f..8815802 100644
          image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
          if (False(image.flags & ImageFlagBits::Tracked)) {
              TrackImage(image, image_id);
-@@ -2537,6 +3346,11 @@ template <class P>
+@@ -2537,6 +3355,11 @@ template <class P>
  void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies) {
      Image& dst = slot_images[dst_id];
      Image& src = slot_images[src_id];
@@ -58418,7 +58524,7 @@ index e92e54f..8815802 100644
      const bool is_rescaled = True(src.flags & ImageFlagBits::Rescaled);
      if (is_rescaled) {
          ASSERT(True(dst.flags & ImageFlagBits::Rescaled));
-@@ -2628,7 +3442,8 @@ void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id)
+@@ -2628,7 +3451,8 @@ void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id)
      }
      if (new_id) {
          const ImageViewBase& old_view = slot_image_views[new_id];
@@ -58429,7 +58535,7 @@ index e92e54f..8815802 100644
              uncommitted_downloads.emplace_back(new_download);
          }
 diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
-index 8a2318c..1bf8c58 100644
+index 8a2318c..b4e3c4b 100644
 --- a/src/video_core/texture_cache/texture_cache_base.h
 +++ b/src/video_core/texture_cache/texture_cache_base.h
 @@ -9,6 +9,7 @@
@@ -58555,7 +58661,18 @@ index 8a2318c..1bf8c58 100644
      /// Delete image from the cache
      void DeleteImage(ImageId image, bool immediate_delete = false);
  
-@@ -448,6 +507,12 @@ private:
+@@ -419,6 +478,10 @@ private:
+     bool ScaleDown(Image& image);
+     u64 GetScaledImageSizeBytes(const ImageBase& image);
+ 
++    /// The device memory an image counts for in total_used_memory between two driver readings
++    /// (none for an unbacked image).
++    u64 ImageMemoryBytes(const ImageBase& image) const;
++
+     void QueueAsyncDecode(Image& image, ImageId image_id);
+     void TickAsyncDecode();
+ 
+@@ -448,6 +511,12 @@ private:
  
      DAddr virtual_invalid_space{};
  
@@ -58568,7 +58685,7 @@ index 8a2318c..1bf8c58 100644
      bool has_deleted_images = false;
      bool is_rescaling = false;
      u64 total_used_memory = 0;
-@@ -463,11 +528,7 @@ private:
+@@ -463,11 +532,7 @@ private:
          size_t size;
      };
  
