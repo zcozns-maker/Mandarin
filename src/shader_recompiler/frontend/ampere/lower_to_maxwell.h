@@ -604,20 +604,21 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                  (u64{14} << 35) | (u64{7} << 39) | (u64{a.swizzle} << 47));
             break;
         }
-        case 0x234: { // HSETP2 register form (seen rejected in Donkey Kong Bananza compute shaders).
-            // Same field layout as the 0x434 immediate form and HSET2: compare 76..79, combine 69..70,
-            // destination predicates 81..83 / 84..86, combining predicate 87..90.
+        case 0x234: { // HSETP2, packed half comparison of two registers into two predicates.
+            // Laid out like HSET2 (compare 76-79, combine 69-70, .H_AND 71, FTZ 80, Pc 87-90) with
+            // predicate outputs in 81-83 and 84-86 (as 0x434). Donkey Kong Bananza's compute shaders
+            // in some levels use it; rejecting them left the screen blue.
             const u32 combine = insn.Bits(69, 2);
             if (insn.Bits(16, 8) || insn.Bits(64, 5) || combine > 2 || insn.Bits(91, 1) ||
                 (insn.words[1] & 0x0fffff00U))
-                return fail(index, "native packed half predicate register mode");
+                return fail(index, "native packed half predicate mode");
             const auto a = half_source(0), b = half_source(1);
-            emit(0x5d20000000000000ULL | predicate | (u64{insn.Bits(81, 3)} << 3) |
-                 insn.Bits(84, 3) | (u64{a.reg} << 8) | (u64{b.reg} << 20) |
+            emit(0x5d20000000000000ULL | predicate | (u64{insn.Bits(81, 3)} << 3) | insn.Bits(84, 3) |
+                 (u64{insn.Bits(80, 1)} << 6) | (u64{a.reg} << 8) | (u64{b.reg} << 20) |
                  (u64{b.swizzle} << 28) | (u64{b.absolute} << 30) | (u64{b.negate} << 31) |
                  (u64{insn.Bits(76, 4)} << 35) | (u64{insn.Bits(87, 4)} << 39) |
                  (u64{a.negate} << 43) | (u64{a.absolute} << 44) | (u64{combine} << 45) |
-                 (u64{a.swizzle} << 47) | (u64{insn.Bits(71, 1)} << 49) | (u64{insn.Bits(80, 1)} << 50));
+                 (u64{a.swizzle} << 47) | (u64{insn.Bits(71, 1)} << 49));
             break;
         }
         case 0x233: case 0x433: case 0x633: { // HSET2, packed half comparisons and predicate combination.
@@ -1282,9 +1283,9 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                  (u64{uniform_register(high_result ? high : low)} << 8) | (u64{insn.words[1]} << 20));
             break;
         }
-        case 0xb82: { // LDC.64 indexed byte offset
+        case 0xb82: { // LDC, 8 to 64 bits (U8/S8/U16/S16/32/64, Maxwell's order), indexed byte offset
             const u32 width = insn.Bits(73, 3);
-            if ((width != 0 && width != 4 && width != 5) || insn.Bits(78, 2) || insn.Bits(91, 1) ||
+            if (width > 5 || insn.Bits(78, 2) || insn.Bits(91, 1) ||
                 insn.Bits(54, 5) >= 18 ||
                 (width == 5 && ((dest & 1) || dest >= 254))) return fail(index, "native indexed constant load mode");
             emit(base(0xef90000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
@@ -1483,13 +1484,16 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                 (u64{data} << 20) | (u64{1} << 48));
             break;
         }
-        case 0x9a8: { // ATOMG.E.ADD.STRONG.GPU U32 through a uniform pointer.
+        case 0x9a8: { // ATOMG.E.ADD.STRONG.GPU U32 through a uniform pointer plus a byte offset.
             const u32 address = uniform_register(insn.Bits(64, 6));
-            if (insn.Bits(24, 8) != 255 || insn.Bits(40, 24) ||
+            // The native offset is 24 bits signed; Maxwell ATOM keeps 20 (bits 28-47).
+            const s32 offset = static_cast<s32>(insn.Bits(40, 24) << 8) >> 8;
+            if (insn.Bits(24, 8) != 255 || offset < -(1 << 19) || offset >= (1 << 19) ||
                 (insn.words[2] & ~0x3fU) != 0x081ee140 || address == ~0U || (address & 1))
                 return fail(index, "native global atomic mode");
             emit(0xed00000000000000ULL | predicate | dest | (u64{address} << 8) |
-                (u64{insn.Bits(32, 8)} << 20) | (u64{1} << 48));
+                (u64{insn.Bits(32, 8)} << 20) | (u64{static_cast<u32>(offset) & 0xfffffU} << 28) |
+                (u64{1} << 48));
             break;
         }
         case 0xb97: { // SULD.P.IGN, direct descriptor and R, RG, or RGBA channels, any dimension.
@@ -2064,6 +2068,31 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                 for (u32 component = 0; component < count; ++component)
                     copy(component < 2 ? static_cast<u32>(dest) + component : second + component - 2,
                          250 + component);
+                break;
+            }
+            // 2D gather with per-texel offsets (bits 76-77 = 2, .PTP): Rb:Rb+1 hold the four
+            // offset pairs. Maxwell TLD4 takes them the same way (offset type 2, bits 54-55)
+            // from its meta register. Welcome Tour gathers like this right after its start.
+            const u32 coordinate = insn.Bits(24, 8), offsets = insn.Bits(32, 8);
+            if (insn.Bits(76, 2) == 2 && insn.Bits(61, 3) == 1 && !insn.Bits(59, 1) && insn.Bits(60, 1) &&
+                mask && !insn.Bits(78, 3) && insn.Bits(81, 3) == 7 && !insn.Bits(89, 1) && !insn.Bits(91, 1) &&
+                binding < 18 && offset <= 0x1fff &&
+                (second != 255 ? count >= 3 : count <= 2) && dest + 1 < reserved_register &&
+                (count == 1 || !(dest & 1)) &&
+                (second == 255 || ((count < 4 || !(second & 1)) && second + 1 < reserved_register)) &&
+                coordinate + 1 < reserved_register && offsets + 1 < reserved_register) {
+                if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
+                    return fail(index, "native texture descriptor buffer conflict");
+                result.required_texture_buffer = binding;
+                // The components come back packed from R250 in mask order.
+                emit(0xc800000000000000ULL | (u64{insn.Bits(87, 2)} << 56) | (u64{2} << 54) | predicate |
+                     250 | (u64{coordinate} << 8) | (u64{offsets} << 20) | (u64{2} << 28) |
+                     (u64{mask} << 31) | (u64{offset} << 36) | (u64{insn.Bits(90, 1)} << 49) |
+                     (u64{7} << 51));
+                for (u32 component = 0; component < count; ++component)
+                    emit(0x5c98000000000000ULL | predicate |
+                         (component < 2 ? static_cast<u32>(dest) + component : second + component - 2) |
+                         (u64{15} << 39) | (u64{250 + component} << 20));
                 break;
             }
             if (insn.Bits(59, 1) || !insn.Bits(60, 1) || insn.Bits(61, 3) != 1 ||
@@ -3809,8 +3838,14 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (std::ranges::find(validated_barrier_cancellations, index) != validated_barrier_cancellations.end()) break;
             // A BREAK (optionally conditional) out of the innermost PBK scope only drops that scope's
             // token; the threads then branch past its BSYNC, and an enclosing SYNC scope pops the
-            // leftover PBK token together with everything above it, so nothing is emitted.
-            if (!barrier_tokens.empty() && insn.Bits(16, 4) == barrier_tokens.back() &&
+            // leftover PBK token together with everything above it, so nothing is emitted. When the
+            // next instruction breaks the enclosing scope too (same predicate), it is a multi-level
+            // exit and the cancellation sequence below validates it as a whole.
+            const bool breaks_outer_next =
+                barrier_tokens.size() >= 2 && index + 1 < code.size() &&
+                code[index + 1].Bits(0, 12) == 0x942 && code[index + 1].Bits(12, 4) == insn.Bits(12, 4) &&
+                code[index + 1].Bits(16, 4) == barrier_tokens[barrier_tokens.size() - 2];
+            if (!breaks_outer_next && !barrier_tokens.empty() && insn.Bits(16, 4) == barrier_tokens.back() &&
                 !barrier_sync_scopes.back() && insn.words[1] == 0 && (insn.words[2] & ~0x07800000U) == 0 &&
                 std::any_of(barrier_sync_scopes.begin(), barrier_sync_scopes.end() - 1,
                             [](bool sync) { return sync; }))

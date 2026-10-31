@@ -22,6 +22,7 @@
 #include "video_core/gpu_write_watch.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
 
@@ -318,6 +319,9 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     const bool has_new_downloads = tmp_intervals.size() != 0;
     for (const auto& pair : tmp_intervals) {
         gpu_modified_ranges.Add(pair.first, pair.second);
+        if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+            Tegra::Nx2MarkGpuWritten(pair.first, pair.second);
+        }
     }
     const auto& copy = copies[0];
     src_buffer.MarkUsage(copy.src_offset, copy.size);
@@ -1177,7 +1181,22 @@ void BufferCache<P>::PrepareGroupedStorage(std::span<const std::pair<Binding*, b
             if (size > std::numeric_limits<u32>::max())
                 throw Shader::RuntimeError("Grouped storage range exceeds supported size");
             const VirtualSegments* found = virtual_ranges.Query(*gpu_memory, group.address, static_cast<u32>(size));
-            if (!found || found->empty()) throw Shader::RuntimeError("Unmapped grouped storage range");
+            if (!found || found->empty()) {
+                // The group has unmapped pages (a binding window larger than the data behind it, as
+                // Donkey Kong Bananza's terrain draws in some levels bind). Bind its members one by
+                // one, as without grouping; refusing the draw failed its whole command list.
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+                    LOG_WARNING(HW_GPU, "Grouped storage range [{:#x}, +{:#x}) has unmapped pages; its {} bindings are bound individually",
+                                group.address, size, group.members.size());
+                }
+                for (size_t member : group.members) {
+                    auto& binding = *bindings[member].first;
+                    binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+                    ResolveMultiRangeStorage(binding, bindings[member].second, pool);
+                }
+                continue;
+            }
             const bool written = std::any_of(group.members.begin(), group.members.end(),
                 [&](size_t member) { return bindings[member].second; });
             for (const auto& [previous, previous_written] : physical_groups) {
@@ -1784,6 +1803,9 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
     gpu_modified_ranges.Add(device_addr, size);
     QueueDownload(device_addr, size);
+    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+        Tegra::Nx2MarkGpuWritten(device_addr, size);
+    }
 }
 
 template <class P>

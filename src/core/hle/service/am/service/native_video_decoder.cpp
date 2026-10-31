@@ -125,6 +125,7 @@ private:
             operation_syncpoint.reset();
         }
         started = false;
+        stream_ended = false;
         if (submission_event) submission_event->Clear(kernel);
     }
 
@@ -169,6 +170,7 @@ private:
                         consumed_size = input.size();
                         pending_input_bytes += input.size();
                         pending_inputs.push_back({std::vector<u8>{input.begin(), input.end()}, submission_id, timestamp, bool(packet[7] & 0xff)});
+                        stream_ended = false;
                         result = PumpOutput();
                     } else if (submission_event) {
                         submission_event->Clear(kernel);
@@ -395,6 +397,7 @@ private:
             properties[7] = static_cast<u32>(timestamp_ns >> 32);
             properties[8] = frame.eos ? 1 : 0;
             output_properties.push_back(properties);
+            if (frame.eos) stream_ended = true;
             image->available = false;
             system.Host1x().GetSyncpointManager().IncrementGuest(*operation_syncpoint);
             system.Host1x().GetSyncpointManager().IncrementHost(*operation_syncpoint);
@@ -443,7 +446,19 @@ private:
                     result = Kernel::ResultNotImplemented;
                     if (!(packet[4] || packet[5] || packet[6] || packet[7])) {
                         result = Kernel::ResultInvalidState;
-                        if (!image->available) {
+                        if (stream_ended && pending_inputs.empty() && decoded_frames.empty()) {
+                            // After the end of the stream nothing fills an image again, so a release
+                            // completes at once: its fence is the syncpoint's current value. Mario Kart
+                            // World releases its images after a movie ends and repeats that until their
+                            // fences are reached (a fence for a frame that never comes hung the game
+                            // on a black screen after its title movie).
+                            const u32 reached = system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(*operation_syncpoint);
+                            next_completion_value = reached;
+                            completion_value = reached;
+                            image->completion_value = reached;
+                            image->available = true;
+                            result = ResultSuccess;
+                        } else if (!image->available) {
                             completion_value = ++next_completion_value;
                             image->completion_value = completion_value;
                             image->available = true;
@@ -644,7 +659,27 @@ private:
                 // AV1 passes its mime string in the buffer. The H.264 initializer's trailing
                 // (pointer, size) pair is codec-specific data (parameter sets) instead; when present
                 // it is given to FFmpeg as extradata by reopening the decoder.
+                if (decoder && mime_is("video/vp9")) {
+                    // A decoder initialized without a codec (see InitializeByTransferMemory) named
+                    // VP9: decode with FFmpeg instead of the AV1 backend.
+                    auto ffmpeg_decoder = std::make_unique<FFmpeg::Decoder>(Tegra::Host1x::NvdecCommon::VideoCodec::VP9);
+                    if (ffmpeg_decoder->GetCodec()) {
+                        auto ffmpeg_context = std::make_unique<FFmpeg::DecoderContext>(*ffmpeg_decoder);
+                        if (ffmpeg_context->OpenContext(*ffmpeg_decoder)) {
+                            decoder.reset();
+                            h264_decoder = std::move(ffmpeg_decoder);
+                            h264_context = std::move(ffmpeg_context);
+                            ffmpeg_vp9 = true;
+                        }
+                    }
+                }
                 result = Kernel::ResultNotImplemented;
+                if (!h264_context && !mime_is("video/av1")) {
+                    const auto end = std::find(mime.begin(), mime.end(), u8{0});
+                    const std::string name(mime.begin(), end);
+                    LOG_WARNING(Service_AM, "native video configure: unknown codec name \"{}\" ({} bytes)",
+                                name.substr(0, 32), mime.size());
+                }
                 if (h264_context || mime_is("video/av1")) {
                     result = Kernel::ResultInvalidSize;
                     if (request->input_capacity <= transfer_memory->GetSize()) {
@@ -707,19 +742,25 @@ private:
             // Output format 3 pairs with NV12 pools (image kind 1) and 2 with RGBA pools (kind 5).
             // Codec 3 is the AV1 decoder, codec 0 the H.264 decoder: nn::codec::InitializeH264Decoder
             // sends codec 0 (hard-coded in the SDK helper) and the AV1 initializer sends 3.
-            // The command 200 helper (Kirby Air Riders) sends codec 1, input format 3 and output format 3
-            // (NV12 pools): treated as the AV1 decoder, the only decoder whose input format is 3. This
-            // pairing is inferred, the codec numbering of the real server was not decoded.
+            // Codec 1 with input format 3 and output format 3 (NV12 pools) names its codec later, in
+            // Configure's mime string: Kirby Air Riders sends it through the command 200 helper (AV1),
+            // Mario Kart World 1.8.0 through 201 ("video/vp9", its cup-opening movies). It starts as
+            // the AV1 decoder and Configure switches it to VP9. This pairing is inferred, the codec
+            // numbering of the real server was not decoded.
             const bool is_av1 = kind == NativeVideoKind::Decoder &&
                                 ((!is_200 && request->codec == 3 && request->output_format == 2) ||
-                                 (is_200 && request->codec == 1 && request->output_format == 3)) &&
+                                 (request->codec == 1 && request->output_format == 3)) &&
                                 request->input_format == 3 && request->output_mode == 1;
+            // H.264 also comes with input format 3: Nintendo Switch 2 Welcome Tour sends it through 201
+            // with output format 2 and its parameter sets (Annex B) in Configure's buffer.
             const bool is_h264 = kind == NativeVideoKind::Decoder && request->codec == 0 &&
-                                 request->input_format == 1 && (request->output_format == 2 || request->output_format == 3) &&
+                                 (request->input_format == 1 || request->input_format == 3) &&
+                                 (request->output_format == 2 || request->output_format == 3) &&
                                  request->output_mode == 1;
-            // The command 200 helper with codec 1 and input format 1 is the VP9 decoder
-            // (Donkey Kong Bananza; its configuration data comes from Vp9DecoderHolder).
-            const bool is_vp9 = kind == NativeVideoKind::Decoder && is_200 && request->codec == 1 &&
+            // Codec 1 with input format 1 is the VP9 decoder: Donkey Kong Bananza sends it through the
+            // command 200 helper (its configuration data comes from Vp9DecoderHolder), Mario Kart
+            // World 1.8.0 through 201.
+            const bool is_vp9 = kind == NativeVideoKind::Decoder && request->codec == 1 &&
                                 request->input_format == 1 && (request->output_format == 2 || request->output_format == 3) &&
                                 request->output_mode == 1;
             if (is_av1 || is_h264 || is_vp9) {
@@ -761,9 +802,16 @@ private:
                     }
                 }
             }
-            LOG_DEBUG(Service_AM, "native video initialize codec={}, output_format={}, input_format={}, output_mode={}, memory_bytes={:#x}, result={:#x}",
-                      request->codec, request->output_format, request->input_format, request->output_mode,
-                      request->memory_size, result.raw);
+            // A refused setup usually makes the game abort (2001-0033 for an unknown codec pairing).
+            if (result.IsSuccess()) {
+                LOG_DEBUG(Service_AM, "native video initialize codec={}, output_format={}, input_format={}, output_mode={}, memory_bytes={:#x}",
+                          request->codec, request->output_format, request->input_format, request->output_mode,
+                          request->memory_size);
+            } else {
+                LOG_WARNING(Service_AM, "native video initialize refused: command {}, codec={}, output_format={}, input_format={}, output_mode={}, memory_bytes={:#x}, result={:#x}",
+                            ctx.GetCommand(), request->codec, request->output_format, request->input_format,
+                            request->output_mode, request->memory_size, result.raw);
+            }
         }
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result.raw);
@@ -784,6 +832,8 @@ private:
     u64 pending_input_bytes{};
     u64 next_submission_id{1};
     bool started{};
+    /// The end-of-stream frame was handed out and nothing was submitted since.
+    bool stream_ended{};
     Kernel::KProcess* process;
     NativeVideoKind kind;
     Kernel::KTransferMemory* transfer_memory{};
