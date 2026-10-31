@@ -97,6 +97,8 @@ enum class AppletId : u32 {
     Lhub = 0x35,
     SoftwareKeyboardNative = 0x01020011,
     ControllerNative = 0x0100000C,
+    // Switch 2 eShop (Kirby Air Riders opens "scene=product_detail&mode=mini" ads with it).
+    ShopNative = 0x01000014,
 };
 
 constexpr AppletId GetFrontendAppletId(AppletId id) {
@@ -105,9 +107,22 @@ constexpr AppletId GetFrontendAppletId(AppletId id) {
         return AppletId::SoftwareKeyboard;
     case AppletId::ControllerNative:
         return AppletId::Controller;
+    case AppletId::ShopNative:
+        return AppletId::Shop;
     default:
-        return id;
+        break;
     }
+    // Build 10: other Switch 2 ids of the form 0x0100'00xx name the Switch 1 applet xx. Using its
+    // frontend (e.g. the web/shop applets close as if the user backed out) instead of the stub
+    // applet, whose zero-filled reply made Kirby Air Riders panic.
+    const u32 raw = static_cast<u32>(id);
+    if ((raw & 0xffffff00U) == 0x01000000U) {
+        const u32 base = raw & 0xffU;
+        if ((base >= 0x0A && base <= 0x1A) || base == 0x35) {
+            return static_cast<AppletId>(base);
+        }
+    }
+    return id;
 }
 
 enum class AppletProgramId : u64 {
