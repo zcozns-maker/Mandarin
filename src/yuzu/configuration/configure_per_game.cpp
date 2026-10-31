@@ -15,8 +15,13 @@
 
 #include <QAbstractButton>
 #include <QCheckBox>
+#include <QFrame>
+#include <QGuiApplication>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
 #include <QString>
+#include <QStyle>
 #include <QTimer>
 
 #include "common/fs/fs_util.h"
@@ -47,6 +52,56 @@
 #include "yuzu/configuration/configure_system.h"
 #include "yuzu/util/util.h"
 
+namespace {
+
+// Eden-NS2 (ZiK local): the settings tabs - Adv. Graphics especially, with all the
+// "Switch 2 / Eden-NS2: ..." entries - can be taller than the screen. A tab's minimum height
+// used to become the dialog's minimum height, pushing OK/Cancel/Apply below the screen edge.
+// Each tab now lives in a scroll area, so the dialog can be any size and the buttons stay visible.
+constexpr char kNs2ScrollWrapper[] = "ns2_scroll_wrapper";
+
+QScrollArea* WrapTabInScrollArea(QWidget* page, QWidget* parent) {
+    auto* const scroll = new QScrollArea(parent);
+    scroll->setProperty(kNs2ScrollWrapper, true);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setAccessibleName(page->accessibleName());
+    scroll->setWidget(page);
+    scroll->viewport()->setAutoFillBackground(false);
+    page->setAutoFillBackground(false);
+    return scroll;
+}
+
+// Start at the preferred size but never larger than ~90% of the available screen area,
+// centred on the screen of the parent window.
+void FitDialogToScreen(QWidget* dialog, const QSize& preferred) {
+    QScreen* screen = nullptr;
+    if (dialog->parentWidget() != nullptr) {
+        screen = dialog->parentWidget()->screen();
+    }
+    if (screen == nullptr) {
+        screen = dialog->screen();
+    }
+    if (screen == nullptr) {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (screen == nullptr) {
+        dialog->resize(preferred);
+        return;
+    }
+    const QRect available = screen->availableGeometry();
+    const QSize size{std::min(preferred.width(), available.width() * 9 / 10),
+                     std::min(preferred.height(), available.height() * 9 / 10)};
+    dialog->resize(size);
+    QRect frame{QPoint{0, 0}, size};
+    frame.moveCenter(available.center());
+    dialog->move(frame.topLeft());
+}
+
+} // namespace
+
 ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::string& file_name,
                                    std::vector<VkDeviceInfo::Record>& vk_device_records,
                                    Core::System& system_)
@@ -75,16 +130,31 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
 
     ui->setupUi(this);
 
+    // Add-Ons already has its own scroll area; every other tab is wrapped in one (Eden-NS2).
     ui->tabWidget->addTab(addons_tab.get(), tr("Add-Ons"));
-    ui->tabWidget->addTab(system_tab.get(), tr("System"));
-    ui->tabWidget->addTab(cpu_tab.get(), tr("CPU"));
-    ui->tabWidget->addTab(graphics_tab.get(), tr("Graphics"));
-    ui->tabWidget->addTab(graphics_advanced_tab.get(), tr("Adv. Graphics"));
-    ui->tabWidget->addTab(graphics_extensions_tab.get(), tr("Ext. Graphics"));
-    ui->tabWidget->addTab(audio_tab.get(), tr("Audio"));
-    ui->tabWidget->addTab(input_tab.get(), tr("Input Profiles"));
-    ui->tabWidget->addTab(network_tab.get(), tr("Network"));
-    ui->tabWidget->addTab(applets_tab.get(), tr("Applets"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(system_tab.get(), this), tr("System"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(cpu_tab.get(), this), tr("CPU"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(graphics_tab.get(), this), tr("Graphics"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(graphics_advanced_tab.get(), this),
+                          tr("Adv. Graphics"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(graphics_extensions_tab.get(), this),
+                          tr("Ext. Graphics"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(audio_tab.get(), this), tr("Audio"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(input_tab.get(), this), tr("Input Profiles"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(network_tab.get(), this), tr("Network"));
+    ui->tabWidget->addTab(WrapTabInScrollArea(applets_tab.get(), this), tr("Applets"));
+
+    // Eden-NS2: the Info panel (256px icon + fields) scrolls too on very short screens.
+    auto* const info_scroll = new QScrollArea(this);
+    info_scroll->setWidgetResizable(true);
+    info_scroll->setFrameShape(QFrame::NoFrame);
+    info_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    info_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    info_scroll->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+    delete ui->horizontalLayout->replaceWidget(ui->groupBox, info_scroll);
+    info_scroll->setWidget(ui->groupBox);
+    info_scroll->setMinimumWidth(ui->groupBox->sizeHint().width() +
+                                 style()->pixelMetric(QStyle::PM_ScrollBarExtent) + 4);
 
     setFocusPolicy(Qt::ClickFocus);
     setWindowTitle(tr("Properties"));
@@ -99,6 +169,12 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         connect(apply_button, &QAbstractButton::clicked, this,
                 &ConfigurePerGame::HandleApplyButtonClicked);
     }
+
+    // Eden-NS2: resizable (size grip + maximize), initial size capped to ~90% of the screen.
+    setSizeGripEnabled(true);
+    setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    const QSize hint = sizeHint();
+    FitDialogToScreen(this, QSize{std::max(900, hint.width()), std::max(760, hint.height())});
 
     LoadConfiguration();
 }

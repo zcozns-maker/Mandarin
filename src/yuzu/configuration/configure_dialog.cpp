@@ -4,7 +4,12 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <memory>
+#include <QFrame>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QScrollArea>
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -31,6 +36,68 @@
 #include "yuzu/configuration/configure_ui.h"
 #include "yuzu/configuration/configure_web.h"
 #include "yuzu/hotkeys.h"
+
+namespace {
+
+// Eden-NS2 (ZiK local): the settings tabs - Adv. Graphics especially, with all the
+// "Switch 2 / Eden-NS2: ..." entries - can be taller than the screen. A tab's minimum height
+// used to become the dialog's minimum height, pushing OK/Cancel/Apply below the screen edge.
+// Each tab now lives in a scroll area, so the dialog can be any size and the buttons stay visible.
+constexpr char kNs2ScrollWrapper[] = "ns2_scroll_wrapper";
+
+QScrollArea* WrapTabInScrollArea(QWidget* page, QWidget* parent) {
+    auto* const scroll = new QScrollArea(parent);
+    scroll->setProperty(kNs2ScrollWrapper, true);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setAccessibleName(page->accessibleName());
+    scroll->setWidget(page);
+    scroll->viewport()->setAutoFillBackground(false);
+    page->setAutoFillBackground(false);
+    return scroll;
+}
+
+// Start at the preferred size but never larger than ~90% of the available screen area,
+// centred on the screen of the parent window.
+void FitDialogToScreen(QWidget* dialog, const QSize& preferred) {
+    QScreen* screen = nullptr;
+    if (dialog->parentWidget() != nullptr) {
+        screen = dialog->parentWidget()->screen();
+    }
+    if (screen == nullptr) {
+        screen = dialog->screen();
+    }
+    if (screen == nullptr) {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (screen == nullptr) {
+        dialog->resize(preferred);
+        return;
+    }
+    const QRect available = screen->availableGeometry();
+    const QSize size{std::min(preferred.width(), available.width() * 9 / 10),
+                     std::min(preferred.height(), available.height() * 9 / 10)};
+    dialog->resize(size);
+    QRect frame{QPoint{0, 0}, size};
+    frame.moveCenter(available.center());
+    dialog->move(frame.topLeft());
+}
+
+// Returns the scroll area wrapping |tab| (see WrapTabInScrollArea), or |tab| itself.
+QWidget* PageFor(QWidget* tab) {
+    QWidget* const viewport = tab->parentWidget();
+    QWidget* const outer = viewport != nullptr ? viewport->parentWidget() : nullptr;
+    auto* const scroll = qobject_cast<QScrollArea*>(outer);
+    if (scroll != nullptr && scroll->property(kNs2ScrollWrapper).toBool() &&
+        scroll->widget() == tab) {
+        return scroll;
+    }
+    return tab;
+}
+
+} // namespace
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
                                  InputCommon::InputSubsystem* input_subsystem,
@@ -66,22 +133,36 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     ui->setupUi(this);
 
-    ui->tabWidget->addTab(applets_tab.get(), tr("Applets"));
-    ui->tabWidget->addTab(audio_tab.get(), tr("Audio"));
-    ui->tabWidget->addTab(cpu_tab.get(), tr("CPU"));
-    ui->tabWidget->addTab(debug_tab_tab.get(), tr("Debug"));
-    ui->tabWidget->addTab(filesystem_tab.get(), tr("Filesystem"));
-    ui->tabWidget->addTab(general_tab.get(), tr("General"));
-    ui->tabWidget->addTab(graphics_tab.get(), tr("Graphics"));
-    ui->tabWidget->addTab(graphics_advanced_tab.get(), tr("GraphicsAdvanced"));
-    ui->tabWidget->addTab(graphics_extensions_tab.get(), tr("GraphicsExtra"));
+    // Eden-NS2: settings-list tabs scroll instead of growing the dialog past the screen.
+    // Hotkeys/Profiles/Controls keep their own views. Tabs are added through PageFor().
+    for (QWidget* const tab :
+         {static_cast<QWidget*>(applets_tab.get()), static_cast<QWidget*>(audio_tab.get()),
+          static_cast<QWidget*>(cpu_tab.get()), static_cast<QWidget*>(debug_tab_tab.get()),
+          static_cast<QWidget*>(filesystem_tab.get()), static_cast<QWidget*>(general_tab.get()),
+          static_cast<QWidget*>(graphics_tab.get()),
+          static_cast<QWidget*>(graphics_advanced_tab.get()),
+          static_cast<QWidget*>(graphics_extensions_tab.get()),
+          static_cast<QWidget*>(network_tab.get()), static_cast<QWidget*>(system_tab.get()),
+          static_cast<QWidget*>(ui_tab.get()), static_cast<QWidget*>(web_tab.get())}) {
+        WrapTabInScrollArea(tab, this);
+    }
+
+    ui->tabWidget->addTab(PageFor(applets_tab.get()), tr("Applets"));
+    ui->tabWidget->addTab(PageFor(audio_tab.get()), tr("Audio"));
+    ui->tabWidget->addTab(PageFor(cpu_tab.get()), tr("CPU"));
+    ui->tabWidget->addTab(PageFor(debug_tab_tab.get()), tr("Debug"));
+    ui->tabWidget->addTab(PageFor(filesystem_tab.get()), tr("Filesystem"));
+    ui->tabWidget->addTab(PageFor(general_tab.get()), tr("General"));
+    ui->tabWidget->addTab(PageFor(graphics_tab.get()), tr("Graphics"));
+    ui->tabWidget->addTab(PageFor(graphics_advanced_tab.get()), tr("GraphicsAdvanced"));
+    ui->tabWidget->addTab(PageFor(graphics_extensions_tab.get()), tr("GraphicsExtra"));
     ui->tabWidget->addTab(hotkeys_tab.get(), tr("Hotkeys"));
     ui->tabWidget->addTab(input_tab.get(), tr("Controls"));
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
-    ui->tabWidget->addTab(network_tab.get(), tr("Network"));
-    ui->tabWidget->addTab(system_tab.get(), tr("System"));
-    ui->tabWidget->addTab(ui_tab.get(), tr("Game List"));
-    ui->tabWidget->addTab(web_tab.get(), tr("Web"));
+    ui->tabWidget->addTab(PageFor(network_tab.get()), tr("Network"));
+    ui->tabWidget->addTab(PageFor(system_tab.get()), tr("System"));
+    ui->tabWidget->addTab(PageFor(ui_tab.get()), tr("Game List"));
+    ui->tabWidget->addTab(PageFor(web_tab.get()), tr("Web"));
 
     web_tab->SetWebServiceConfigEnabled(enable_web_config);
     hotkeys_tab->Populate(registry);
@@ -112,6 +193,11 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     adjustSize();
     ui->selectorList->setCurrentRow(0);
+
+    // Eden-NS2: resizable, and never opens taller/wider than ~90% of the screen.
+    setSizeGripEnabled(true);
+    setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    FitDialogToScreen(this, QSize{std::max(width(), 650), std::max(height(), 700)});
 
     // Selects the leftmost button on the bottom bar (Cancel as of writing)
     ui->buttonBox->setFocus();
@@ -219,6 +305,6 @@ void ConfigureDialog::UpdateVisibleTabs() {
 
     for (auto* const tab : tabs) {
         LOG_DEBUG(Frontend, "{}", tab->accessibleName().toStdString());
-        ui->tabWidget->addTab(tab, tab->accessibleName());
+        ui->tabWidget->addTab(PageFor(tab), tab->accessibleName());
     }
 }
