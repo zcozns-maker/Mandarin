@@ -89,6 +89,19 @@ inline u32 VramFreeEarlyMiB() {
     return Settings::values.ns2_vram_free_early_mib.GetValue();
 }
 
+// Read traps on GPU-written buffer pages (per-game ns2_read_traps, off by default).
+// EDEN_NX2_READ_TRAPS=0/1 forces them off/on.
+inline bool ReadTraps() {
+    static const int forced = [] {
+        const char* value = std::getenv("EDEN_NX2_READ_TRAPS");
+        return value == nullptr ? -1 : (value[0] == '0' ? 0 : 1);
+    }();
+    if (forced >= 0) {
+        return forced == 1;
+    }
+    return Settings::values.ns2_read_traps.GetValue();
+}
+
 inline bool DropCrashedGeometryShader() {
     static const bool env = std::getenv("EDEN_NS2_DROP_CRASHED_GS") != nullptr;
     return env || Settings::values.ns2_drop_crashed_gs.GetValue();

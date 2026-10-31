@@ -29,6 +29,7 @@
 #include "common/lru_cache.h"
 #include "common/range_sets.h"
 #include "common/scope_exit.h"
+#include "common/ns2_options.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/buffer_base.h"
@@ -575,7 +576,30 @@ private:
         cpu_read_ranges.ForEachInRange(addr, size, [this](DAddr start, DAddr end) {
             uncommitted_gpu_modified_ranges.Add(start, end - start);
         });
+        // Ranges the CPU has not been seen reading: trap its next read of them (read traps,
+        // Eglantine 41a81ab5e3), which reaches GetFlushArea -> NoteCpuRead, so later GPU writes
+        // to them are copied back at fences like the ones above.
+        if (Settings::NS2::ReadTraps()) {
+            ArmReadTraps(addr, size);
+        }
     }
+
+    /// Takes read permission off these pages once (fastmem only); see QueueDownload.
+    void ArmReadTraps(DAddr device_addr, u64 size) {
+        const DAddr begin = Common::AlignDown(device_addr, Core::DEVICE_PAGESIZE);
+        const DAddr end = Common::AlignUp(device_addr + size, Core::DEVICE_PAGESIZE);
+        u64 known_bytes = 0;
+        const auto count = [&](DAddr lower, DAddr upper) { known_bytes += upper - lower; };
+        read_trapped_ranges.ForEachInRange(begin, end - begin, count);
+        if (known_bytes == end - begin) {
+            return;
+        }
+        read_trapped_ranges.Add(begin, end - begin);
+        device_memory.ArmReadTraps(begin, end - begin);
+    }
+
+    /// Pages already trapped once (re-armed only after their buffer is deleted).
+    Common::RangeSet<DAddr> read_trapped_ranges;
 
     // Async Buffers
     Common::OverlapRangeSet<DAddr> async_downloads;

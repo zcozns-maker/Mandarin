@@ -625,6 +625,10 @@ struct Values {
     // it instead of skipping its draws (AMD crashes on emulated passthrough geometry shaders).
     SwitchableSetting<bool> ns2_drop_crashed_gs{linkage, false, "ns2_drop_crashed_gs",
                                                 Category::RendererAdvanced};
+    // Read traps (Eglantine 41a81ab5e3): GPU-written buffer pages the CPU reads are found by
+    // trapping the first read, then copied back at fences (Mario Kart World's animated colliders).
+    SwitchableSetting<bool> ns2_read_traps{linkage, false, "ns2_read_traps",
+                                           Category::RendererAdvanced};
     // Free textures unused for 30+ frames once the VRAM heap has less than this many MiB left
     // (0 = off). Global 384; an 8 GB card in Mario Kart World wants more headroom (1024).
     SwitchableSetting<u32, true> ns2_vram_free_early_mib{linkage,

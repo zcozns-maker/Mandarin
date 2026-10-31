@@ -1450,6 +1450,14 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
             return *area;
         }
     }
+    // Read traps (per-game ns2_read_traps): a trapped first read of GPU-written buffer data is
+    // flushed from the buffer cache now, so it does not read stale values (Eglantine 41a81ab5e3).
+    if (Settings::NS2::ReadTraps()) {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (auto area = buffer_cache.GetFlushArea(addr, size)) {
+            return *area;
+        }
+    }
     VideoCore::RasterizerDownloadArea new_area{
         .start_address = Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
         .end_address = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE),

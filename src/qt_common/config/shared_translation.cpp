@@ -197,6 +197,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ns2_pipeline_guard, tr("Switch 2 / Eden-NS2: Driver crash guard for pipelines"),
            tr("Remembers pipelines that crashed the GPU driver and skips them on later boots.\n"
               "Recommended on."));
+    INSERT(Settings, ns2_read_traps,
+           tr("Switch 2 / Eden-NS2: Read back GPU results the game reads (read traps)"),
+           tr("Traps the game's first CPU read of buffer data the GPU wrote, then copies that data\n"
+              "back every frame. Fixes Mario Kart World's animated colliders (Dino Dino Jungle\n"
+              "rail, Thwomps). Needs reactive flushing off; not with NCE. May cost some speed."));
     INSERT(Settings, ns2_vram_free_early_mib,
            tr("Switch 2 / Eden-NS2: Free textures early below (MiB free)"),
            tr("When the video memory heap has less than this many MiB left, textures unused for\n"
