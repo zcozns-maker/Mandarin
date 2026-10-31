@@ -69,7 +69,7 @@ public:
 
     u64 GetDeviceMemoryBudget() const;
 
-    bool IsDeviceMemoryNearlyFull() const;
+    bool IsDeviceMemoryNearlyFull(u64 headroom) const;
 
     bool CanReportMemoryUsage() const;
 

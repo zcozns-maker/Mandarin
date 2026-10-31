@@ -79,6 +79,16 @@ inline bool PipelineGuard() {
 
 // Undefined shader values read as 0 instead of OpUndef (Eglantine bb353609e6, AMD colour
 // garbage). Per-game setting ns2_undef_zero, on by default; EDEN_NX2_UNDEF_ZERO=0 forces off.
+// MiB of VRAM heap budget below which unused textures are freed early (0 = off).
+// EDEN_NS2_VRAM_FREE_EARLY_MIB=<n> overrides the per-game setting ns2_vram_free_early_mib.
+inline u32 VramFreeEarlyMiB() {
+    if (const char* env = std::getenv("EDEN_NS2_VRAM_FREE_EARLY_MIB")) {
+        const long value = std::strtol(env, nullptr, 10);
+        return value > 0 ? static_cast<u32>(value) : 0;
+    }
+    return Settings::values.ns2_vram_free_early_mib.GetValue();
+}
+
 inline bool DropCrashedGeometryShader() {
     static const bool env = std::getenv("EDEN_NS2_DROP_CRASHED_GS") != nullptr;
     return env || Settings::values.ns2_drop_crashed_gs.GetValue();

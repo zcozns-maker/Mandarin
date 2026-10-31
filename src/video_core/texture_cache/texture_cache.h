@@ -21,6 +21,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/ns2_options.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
@@ -223,6 +224,50 @@ void TextureCache<P>::RunGarbageCollector(bool emergency) {
 }
 
 template <class P>
+void TextureCache<P>::RunHeapFullCollection(u64 target_bytes) {
+    // Only images unused for half a second (30 frames), least recently used first, so the
+    // working set of the current frames is not thrashed. No GPU->CPU downloads: they need a
+    // staging buffer, which is what runs out when the heap is full.
+    constexpr u64 min_unused_frames = 30;
+    if (frame_tick <= min_unused_frames) {
+        return;
+    }
+    u64 freed = 0;
+    size_t deleted = 0;
+    size_t iterations = 400;
+    lru_cache.ForEachItemBelow(frame_tick - min_unused_frames, [&](ImageId image_id) {
+        if (iterations == 0 || freed >= target_bytes) {
+            return true;
+        }
+        --iterations;
+        auto& image = slot_images[image_id];
+        if (True(image.flags & ImageFlagBits::IsDecoding)) {
+            return false;
+        }
+        if (IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap)) {
+            return false;
+        }
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, image_id);
+        }
+        freed += ImageMemoryBytes(image);
+        if (image.HasScaled()) {
+            freed += GetScaledImageSizeBytes(image);
+        }
+        ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
+        ++deleted;
+        UnregisterImage(image_id);
+        DeleteImage(image_id, image.scale_tick > frame_tick + 5);
+        return false;
+    });
+    static u32 logged{};
+    if (logged++ < 16) {
+        LOG_INFO(HW_GPU, "VRAM heap nearly full: freed {} images, about {} MiB", deleted,
+                 freed >> 20);
+    }
+}
+
+template <class P>
 void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     // EDEN_NX2_TC_EXPECTED_MIB / EDEN_NX2_TC_CRITICAL_MIB override the collector's thresholds.
     for (const auto& [name, target] : {std::pair{"EDEN_NX2_TC_EXPECTED_MIB", &expected_memory},
@@ -320,17 +365,28 @@ void TextureCache<P>::TickFrame() {
     // out VMA's half-empty blocks, is under its thresholds: MKW on an 8 GB card sat at 6142 of
     // 6142 MiB with the cache reading 5538 MiB (critical 5573), until a 256 MiB staging buffer
     // could not be allocated anywhere and Eden aborted. Collect now, at most twice a second.
-    if constexpr (requires { runtime.IsDeviceMemoryNearlyFull(); }) {
-        if (!emergency_collect && frame_tick >= last_heap_full_frame + 30 &&
-            runtime.IsDeviceMemoryNearlyFull()) {
+    // Threshold: per-game ns2_vram_free_early_mib (default 384 MiB, 0 = off).
+    bool heap_full_collect = false;
+    u64 heap_free_early_bytes = 0;
+    if constexpr (requires { runtime.IsDeviceMemoryNearlyFull(u64{}); }) {
+        heap_free_early_bytes = static_cast<u64>(Settings::NS2::VramFreeEarlyMiB()) << 20;
+        if (!heap_full_threshold_logged) {
+            heap_full_threshold_logged = true;
+            LOG_INFO(HW_GPU, "Free textures early when the VRAM heap has under {} MiB left{}",
+                     heap_free_early_bytes >> 20, heap_free_early_bytes == 0 ? " (off)" : "");
+        }
+        if (heap_free_early_bytes != 0 && !emergency_collect &&
+            frame_tick >= last_heap_full_frame + 30 &&
+            runtime.IsDeviceMemoryNearlyFull(heap_free_early_bytes)) {
             last_heap_full_frame = frame_tick;
-            emergency_collect = true;
+            heap_full_collect = true;
             static u32 logged{};
             if (logged++ < 16) {
                 LOG_WARNING(HW_GPU,
-                            "Video memory heap nearly full ({} MiB counted, critical {} MiB); "
-                            "freeing unused images now",
-                            total_used_memory >> 20, critical_memory >> 20);
+                            "Video memory heap has under {} MiB left ({} MiB counted, critical {} "
+                            "MiB); freeing textures unused for 30+ frames",
+                            heap_free_early_bytes >> 20, total_used_memory >> 20,
+                            critical_memory >> 20);
             }
         }
     }
@@ -397,6 +453,9 @@ void TextureCache<P>::TickFrame() {
     }
     if (emergency_collect) {
         RunGarbageCollector(true);
+    } else if (heap_full_collect) {
+        // Free about twice the headroom asked for, oldest first.
+        RunHeapFullCollection(2 * heap_free_early_bytes);
     } else if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
     }

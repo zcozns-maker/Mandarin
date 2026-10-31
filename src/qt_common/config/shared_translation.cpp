@@ -197,6 +197,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ns2_pipeline_guard, tr("Switch 2 / Eden-NS2: Driver crash guard for pipelines"),
            tr("Remembers pipelines that crashed the GPU driver and skips them on later boots.\n"
               "Recommended on."));
+    INSERT(Settings, ns2_vram_free_early_mib,
+           tr("Switch 2 / Eden-NS2: Free textures early below (MiB free)"),
+           tr("When the video memory heap has less than this many MiB left, textures unused for\n"
+              "half a second are freed before allocations start failing (0 = off). 384 default;\n"
+              "1024 helps 8 GB cards in Mario Kart World."));
     INSERT(Settings, ns2_drop_crashed_gs,
            tr("Switch 2 / Eden-NS2: Draw crashed pipelines without geometry shader"),
            tr("Pipelines the crash guard skipped because their geometry shader crashed the GPU\n"

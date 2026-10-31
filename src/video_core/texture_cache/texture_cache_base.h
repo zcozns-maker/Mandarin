@@ -139,6 +139,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 pressure_margin{};     ///< Thresholds lowered by this after allocations ran out of VRAM
     u64 last_pressure_frame{}; ///< Frame of the last out-of-memory response
     u64 last_heap_full_frame{}; ///< Frame of the last "VRAM heap physically full" collection
+    bool heap_full_threshold_logged{};
     u64 astc_opaque_images{};
     u64 astc_alpha_images{};
     std::vector<u8> astc_scan_buffer;
@@ -328,6 +329,10 @@ private:
 
     /// Runs the Garbage Collector.
     void RunGarbageCollector(bool emergency = false);
+
+    /// The VRAM heap is (nearly) full: free least recently used images unused for 30+ frames,
+    /// about target_bytes of them, without downloads (they need staging memory).
+    void RunHeapFullCollection(u64 target_bytes);
 
     /// Find or create an image view in the guest descriptor table
     ImageViewId VisitImageView(u32 index, bool compute);

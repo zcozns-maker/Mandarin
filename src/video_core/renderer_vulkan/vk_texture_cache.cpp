@@ -1954,9 +1954,8 @@ u64 TextureCacheRuntime::GetDeviceMemoryBudget() const {
     return device.GetDeviceMemoryBudget();
 }
 
-bool TextureCacheRuntime::IsDeviceMemoryNearlyFull() const {
-    // Room for one 256 MiB VMA block or staging buffer plus some slack.
-    return device.IsMainHeapNearlyFull(384ULL << 20);
+bool TextureCacheRuntime::IsDeviceMemoryNearlyFull(u64 headroom) const {
+    return device.IsMainHeapNearlyFull(headroom);
 }
 
 bool TextureCacheRuntime::CanDownloadMsaa(const VideoCommon::ImageInfo& info) const {
