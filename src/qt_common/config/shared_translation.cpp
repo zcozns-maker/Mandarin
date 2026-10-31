@@ -183,6 +183,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ns2_lower_uniform_vote, tr("Switch 2 / Eden-NS2: Uniform vote (UVOTE)"),
            tr("Translates warp vote instructions that write a uniform predicate.\n"
               "Experimental; enable per game."));
+    INSERT(Settings, ns2_lower_ret_branch,
+           tr("Switch 2 / Eden-NS2: Lower early returns in shader functions"),
+           tr("Accepts shaders whose functions branch straight to their return instruction\n"
+              "(rejected as 'branch bypasses return linkage'), so their draws are not skipped.\n"
+              "Experimental; if a game hangs or loses the GPU, turn it off."));
     INSERT(Settings, ns2_lower_isbewr_drop, tr("Switch 2 / Eden-NS2: Drop unskewed ISBEWR (diagnostic)"),
            tr("Drops stage-buffer writes that cannot be translated so the rest of the shader runs.\n"
               "Diagnostic only; may cause wrong output."));

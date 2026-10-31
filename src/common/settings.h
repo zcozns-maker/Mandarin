@@ -602,6 +602,8 @@ struct Values {
                                                    Category::RendererAdvanced};
     SwitchableSetting<bool> ns2_lower_isbewr_drop{linkage, false, "ns2_lower_isbewr_drop",
                                                   Category::RendererAdvanced};
+    SwitchableSetting<bool> ns2_lower_ret_branch{linkage, false, "ns2_lower_ret_branch",
+                                                 Category::RendererAdvanced};
     SwitchableSetting<bool> ns2_lower_audit_fsel{linkage, false, "ns2_lower_audit_fsel",
                                                  Category::RendererAdvanced};
     SwitchableSetting<u32, true> ns2_fence_timeout_ms{linkage,

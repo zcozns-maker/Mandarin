@@ -3756,7 +3756,19 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const s64 relative = static_cast<s64>(raw << 14) >> 14;
             if (s64{index} * 16 + 16 + relative != 0)
                 return fail(index, "native return relative base");
+            // Opt-in group "ret_branch": a branch from inside this callee to its RET (or to the link
+            // setup just before it) is an early return. The emitted Maxwell RET pops the hardware
+            // call stack and does not read the link registers whose copies the branch skips.
+            // Branches from outside the callee and call relocations stay rejected.
+            const bool early_return_ok = LowerGroupEnabled("ret_branch");
             for (const auto& relocation : relocations) {
+                const bool early_return = early_return_ok &&
+                    (relocation.target == index || relocation.target + 1 == s64{index}) &&
+                    !relocation.call &&
+                    relocation.output_index >= result.source_instruction_offsets[active_entry];
+                if (early_return) {
+                    continue;
+                }
                 if ((inplace_link && relocation.target > upper_link_setup && relocation.target < index &&
                      relocation.output_index < result.source_instruction_offsets[upper_link_setup]) ||
                     (inplace_link && relocation.target > active_entry && relocation.target < index &&

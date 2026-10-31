@@ -52,6 +52,7 @@ inline bool LowerGroupEnabled(std::string_view group) {
     if (group == "uniform_vote") return v.ns2_lower_uniform_vote.GetValue();
     if (group == "isbewr_drop") return v.ns2_lower_isbewr_drop.GetValue();
     if (group == "audit_fsel") return v.ns2_lower_audit_fsel.GetValue();
+    if (group == "ret_branch") return v.ns2_lower_ret_branch.GetValue();
     return false;
 }
 
