@@ -2283,28 +2283,67 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                      250 + component);
             break;
         }
-        case 0xf60: { // Scalar 2D sample with a uniform bindless descriptor handle.
+        case 0xf60: { // TEX.SCR: sample through a uniform-register bindless handle (scalar operands).
+            // Build 10: every dimension except 3D arrays, auto/zero/bias/explicit LOD, AOFFI, depth
+            // compare, NDV and NODEP (build 9 took only 2D with auto or zero LOD; Yoshi's demo had
+            // ~26 more forms whose shaders were rejected and their draws skipped). SM70 layout per
+            // Mesa NAK (sm70_encode.rs / nak_nir_lower_tex.c, MIT): the operand list is
+            // [array index] + coordinates + [lod or bias] + [packed offset] + [depth reference];
+            // in scalar mode it is split 1 -> Ra, 2 -> Ra Rb, 3 -> Ra Ra+1 Rb, 4 -> Ra Ra+1 Rb Rb+1.
+            // Lowered to Maxwell TEX.B: coordinates (array first) in R244.., handle then the extra
+            // operands in R248.., results in R250.. copied to the native destinations.
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8);
             const u32 handle = uniform_register(insn.Bits(40, 6));
             const u32 mask = insn.Bits(72, 4), count = std::popcount(mask), second = insn.Bits(64, 8);
-            const u32 sample_lod = insn.Bits(87, 3); // explicit zero-LOD form
-            if ((insn.words[1] & ~0x3fffU) != 0x30000000 || sample_lod > 1 ||
-                (insn.words[2] & ~(0x04000000U | 0x00800000U | 0xfffU)) != 0x081e0000 || !mask ||
-                handle == ~0U || a >= reserved_register || b >= reserved_register || dest >= reserved_register ||
-                (count > 1 && ((dest & 1) || dest + 1 >= reserved_register)) ||
-                (count <= 2 ? second != 255 : second >= reserved_register) ||
-                (count == 4 && ((second & 1) || second + 1 >= reserved_register)))
+            const u32 dim = insn.Bits(61, 3), sample_lod = insn.Bits(87, 3);
+            const bool aoffi = insn.Bits(76, 1) != 0, ndv = insn.Bits(77, 1) != 0;
+            const bool depth_compare = insn.Bits(78, 1) != 0;
+            static constexpr std::array<u32, 8> maxwell_type{0, 2, 4, 6, 1, 3, ~0U, 7};
+            static constexpr std::array<u32, 8> coordinate_count{1, 2, 3, 3, 1, 2, 0, 3};
+            const bool array = dim == 4 || dim == 5 || dim == 7;
+            const bool cube = dim == 3 || dim == 7;
+            const u32 operands = (array ? 1U : 0U) + coordinate_count[dim] + (sample_lod >= 2 ? 1U : 0U) +
+                                 (aoffi ? 1U : 0U) + (depth_compare ? 1U : 0U);
+            const auto source_ok = [&](u32 reg, u32 width) {
+                return reg == 255 || reg + width <= reserved_register;
+            };
+            if (insn.Bits(46, 14) != 0 || !insn.Bits(60, 1) || dim == 6 || insn.Bits(79, 2) != 0 ||
+                insn.Bits(81, 3) != 7 || insn.Bits(84, 3) != 1 || sample_lod > 3 || !insn.Bits(91, 1) ||
+                insn.Bits(92, 4) != 0 || (aoffi && cube) || operands == 0 || operands > 4 || !mask ||
+                handle == ~0U || !source_ok(a, operands >= 3 ? 2 : 1) ||
+                (operands >= 2 && !source_ok(b, operands == 4 ? 2 : 1)) ||
+                (dest != 255 && dest >= reserved_register) ||
+                (count > 1 && dest != 255 && ((dest & 1) || dest + 1 >= reserved_register)) ||
+                (count <= 2 ? second != 255 : (second != 255 && second >= reserved_register)) ||
+                (count == 4 && second != 255 && ((second & 1) || second + 1 >= reserved_register)))
                 return fail(index, "native uniform-handle texture sample mode");
             const auto copy = [&](u32 target, u32 source) {
                 emit(0x5c98000000000000ULL | predicate | target | (u64{15} << 39) | (u64{source} << 20));
             };
-            copy(250, a); copy(251, b);
-            emit(0xde80000000000000ULL | predicate | 250 | (u64{250} << 8) |
-                 (u64{handle} << 20) | (u64{2} << 28) | (u64{mask} << 31) | (u64{sample_lod} << 37) |
-                 (u64{7} << 51) | (u64{insn.Bits(90, 1)} << 49));
-            for (u32 component = 0; component < count; ++component)
-                copy(component < 2 ? static_cast<u32>(dest) + component : second + component - 2,
-                     250 + component);
+            const auto next = [](u32 reg) { return reg == 255 ? 255U : reg + 1; };
+            std::array<u32, 4> sources{};
+            switch (operands) {
+            case 1: sources = {a, 255, 255, 255}; break;
+            case 2: sources = {a, b, 255, 255}; break;
+            case 3: sources = {a, next(a), b, 255}; break;
+            default: sources = {a, next(a), b, next(b)}; break;
+            }
+            const u32 coordinates = (array ? 1U : 0U) + coordinate_count[dim];
+            for (u32 i = 0; i < coordinates; ++i)
+                copy(244 + i, sources[i]);
+            copy(248, handle);
+            for (u32 i = coordinates; i < operands; ++i)
+                copy(249 + i - coordinates, sources[i]);
+            emit(0xde80000000000000ULL | predicate | 250 | (u64{244} << 8) | (u64{248} << 20) |
+                 (u64{maxwell_type[dim]} << 28) | (u64{mask} << 31) | (u64{ndv ? 1U : 0U} << 35) |
+                 (u64{aoffi ? 1U : 0U} << 36) | (u64{sample_lod} << 37) | (u64{insn.Bits(90, 1)} << 49) |
+                 (u64{depth_compare ? 1U : 0U} << 50) | (u64{7} << 51));
+            for (u32 component = 0; component < count; ++component) {
+                const u32 target = component < 2 ? (dest == 255 ? 255U : static_cast<u32>(dest) + component)
+                                                 : (second == 255 ? 255U : second + component - 2);
+                if (target != 255)
+                    copy(target, 250 + component);
+            }
             break;
         }
         case 0xf63: { // TLD4.SCR with a packed texture handle in a uniform register.
@@ -2314,7 +2353,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const bool split = second_dest != 255;
             if (!insn.Bits(91, 1) || insn.Bits(46, 14) != 0 || !insn.Bits(60, 1) ||
                 insn.Bits(61, 3) != 1 || mask == 0 || insn.Bits(76, 5) != 0 || insn.Bits(81, 3) != 7 ||
-                insn.Bits(84, 3) != 1 || insn.Bits(89, 2) != 0 || insn.Bits(87, 2) > 3 ||
+                insn.Bits(84, 3) != 1 || insn.Bits(89, 1) != 0 || insn.Bits(87, 2) > 3 ||
                 (split ? count < 3 : count > 2) || dest + 1 >= reserved_register ||
                 (count > 1 && (dest & 1)) ||
                 (split && ((count == 4 && (second_dest & 1)) || second_dest + 1 >= reserved_register)) ||
