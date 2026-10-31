@@ -1486,10 +1486,15 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const s32 offset = static_cast<s32>(insn.Bits(40, 24) << 8) >> 8;
             const bool extra = LowerGroupEnabled("extra_forms");
             if (address >= 254 || (address & 1) || (data == 255 && !extra) || (offset && !extra) ||
-                offset < -(1 << 19) || offset >= (1 << 19) || insn.words[2] != 0x001ee100)
+                offset < -(1 << 19) || offset >= (1 << 19) ||
+                (insn.words[2] & ~(0xfU << 23)) != 0x001ee100 || insn.Bits(87, 4) > 8)
                 return fail(index, "native global register atomic mode");
+            // Build 10: every U32 operation, not only ADD (Yoshi's demo: 11 compute shaders with
+            // ATOMG.EXCH). SM70 bits 87-90 and Maxwell ATOM bits 52-55 share the numbering
+            // ADD MIN MAX INC DEC AND OR XOR EXCH (0-8).
             emit(0xed00000000000000ULL | predicate | dest | (u64{address} << 8) |
-                (u64{data} << 20) | (u64{static_cast<u32>(offset) & 0xfffffU} << 28) | (u64{1} << 48));
+                (u64{data} << 20) | (u64{static_cast<u32>(offset) & 0xfffffU} << 28) | (u64{1} << 48) |
+                (u64{insn.Bits(87, 4)} << 52));
             break;
         }
         case 0x9a8: { // ATOMG.E.ADD.STRONG.GPU U32 through a uniform pointer plus a byte offset.
