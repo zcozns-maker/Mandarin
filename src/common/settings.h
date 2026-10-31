@@ -621,6 +621,10 @@ struct Values {
     // AMD fills with garbage (green/blue patches). On by default; EDEN_NX2_UNDEF_ZERO=0 forces off.
     SwitchableSetting<bool> ns2_undef_zero{linkage, true, "ns2_undef_zero",
                                            Category::RendererAdvanced};
+    // A pipeline the crash guard blacklisted that has a geometry shader is built again without
+    // it instead of skipping its draws (AMD crashes on emulated passthrough geometry shaders).
+    SwitchableSetting<bool> ns2_drop_crashed_gs{linkage, false, "ns2_drop_crashed_gs",
+                                                Category::RendererAdvanced};
     // Diagnostic: dump guest threads after this many seconds without a presented frame (0 = off).
     SwitchableSetting<u32, true> ns2_hang_dump_seconds{linkage,
                                                        0,

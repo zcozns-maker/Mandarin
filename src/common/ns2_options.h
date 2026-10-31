@@ -79,6 +79,11 @@ inline bool PipelineGuard() {
 
 // Undefined shader values read as 0 instead of OpUndef (Eglantine bb353609e6, AMD colour
 // garbage). Per-game setting ns2_undef_zero, on by default; EDEN_NX2_UNDEF_ZERO=0 forces off.
+inline bool DropCrashedGeometryShader() {
+    static const bool env = std::getenv("EDEN_NS2_DROP_CRASHED_GS") != nullptr;
+    return env || Settings::values.ns2_drop_crashed_gs.GetValue();
+}
+
 inline bool UndefZero() {
     static const bool env_off = [] {
         const char* const value = std::getenv("EDEN_NX2_UNDEF_ZERO");

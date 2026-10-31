@@ -197,6 +197,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ns2_pipeline_guard, tr("Switch 2 / Eden-NS2: Driver crash guard for pipelines"),
            tr("Remembers pipelines that crashed the GPU driver and skips them on later boots.\n"
               "Recommended on."));
+    INSERT(Settings, ns2_drop_crashed_gs,
+           tr("Switch 2 / Eden-NS2: Draw crashed pipelines without geometry shader"),
+           tr("Pipelines the crash guard skipped because their geometry shader crashed the GPU\n"
+              "driver are built without that shader, so their objects are drawn instead of\n"
+              "invisible. Layered/multi-viewport output may be wrong. Try per game."));
     INSERT(Settings, ns2_undef_zero, tr("Switch 2 / Eden-NS2: Undefined shader values as zero"),
            tr("Shader values the game never wrote read as 0, as on NVIDIA/Switch hardware, instead of\n"
               "driver garbage. Fixes green/blue patches on AMD. Recommended on."));

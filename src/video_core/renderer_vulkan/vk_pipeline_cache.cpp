@@ -887,6 +887,37 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     if (PipelineCrashGuard::IsBad(hash)) {
+        // Per-game ns2_drop_crashed_gs: build it again without its geometry shader (the stage
+        // the AMD driver crashes on when passthrough is emulated) rather than skip its draws.
+        constexpr size_t gs_index = static_cast<size_t>(Maxwell::ShaderType::Geometry);
+        if (Settings::NS2::DropCrashedGeometryShader() && key.unique_hashes[gs_index] != 0) {
+            GraphicsPipelineCacheKey stripped_key{key};
+            stripped_key.unique_hashes[gs_index] = 0;
+            size_t gs_env = 0;
+            for (size_t i = 0; i < gs_index; ++i) {
+                if (key.unique_hashes[i] != 0) {
+                    ++gs_env;
+                }
+            }
+            std::array<Shader::Environment*, Maxwell::MaxShaderProgram> stripped_envs{};
+            size_t count = 0;
+            for (size_t i = 0; i < envs.size() && count < stripped_envs.size(); ++i) {
+                if (i != gs_env) {
+                    stripped_envs[count++] = envs[i];
+                }
+            }
+            static std::atomic<u32> stripped_logged{};
+            if (stripped_logged.fetch_add(1) < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "Pipeline {:016x} crashed the driver before: building it without its "
+                            "geometry shader {:016x} (as {:016x})",
+                            hash, key.unique_hashes[gs_index], stripped_key.Hash());
+            }
+            return CreateGraphicsPipeline(pools, stripped_key,
+                                          std::span<Shader::Environment* const>(
+                                              stripped_envs.data(), count),
+                                          statistics, build_in_parallel);
+        }
         static std::atomic<u32> logged{};
         if (logged.fetch_add(1) < 16) {
             LOG_WARNING(Render_Vulkan, "Skipping pipeline {:016x}: it crashed the driver before",
