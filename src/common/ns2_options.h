@@ -77,4 +77,14 @@ inline bool PipelineGuard() {
     return !env_off && Settings::values.ns2_pipeline_guard.GetValue();
 }
 
+// Undefined shader values read as 0 instead of OpUndef (Eglantine bb353609e6, AMD colour
+// garbage). Per-game setting ns2_undef_zero, on by default; EDEN_NX2_UNDEF_ZERO=0 forces off.
+inline bool UndefZero() {
+    static const bool env_off = [] {
+        const char* const value = std::getenv("EDEN_NX2_UNDEF_ZERO");
+        return value != nullptr && value[0] == '0';
+    }();
+    return !env_off && Settings::values.ns2_undef_zero.GetValue();
+}
+
 } // namespace Settings::NS2

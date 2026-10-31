@@ -617,6 +617,10 @@ struct Values {
                                               Category::RendererAdvanced};
     SwitchableSetting<bool> ns2_pipeline_guard{linkage, true, "ns2_pipeline_guard",
                                                Category::RendererAdvanced};
+    // Shader registers read before any write are 0 (as NVIDIA gives) instead of OpUndef, which
+    // AMD fills with garbage (green/blue patches). On by default; EDEN_NX2_UNDEF_ZERO=0 forces off.
+    SwitchableSetting<bool> ns2_undef_zero{linkage, true, "ns2_undef_zero",
+                                           Category::RendererAdvanced};
     // Diagnostic: dump guest threads after this many seconds without a presented frame (0 = off).
     SwitchableSetting<u32, true> ns2_hang_dump_seconds{linkage,
                                                        0,
