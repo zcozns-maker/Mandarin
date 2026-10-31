@@ -284,7 +284,10 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (reg == 63) return 255;
             return ~0U;
         };
-        if (opcode == 0x292 && (insn.Bits(12, 4) != 7 || insn.Bits(40, 24) || insn.Bits(80, 1) ||
+        // Opt-in group "extra_forms" (build 9): a ULOP3 guarded by a uniform predicate takes the
+        // same guarded-uniform path as the other uniform arithmetic (UPn loaded into P6 around it).
+        if (opcode == 0x292 && ((insn.Bits(12, 4) != 7 && !LowerGroupEnabled("extra_forms")) ||
+                                insn.Bits(40, 24) || insn.Bits(80, 1) ||
                                 insn.Bits(81, 3) != 7 || insn.Bits(87, 4) != 15 || !insn.Bits(91, 1)))
             return fail(index, "native uniform logic mode");
         if (opcode == 0x291 || opcode == 0x2a4 || opcode == 0x2a5 || opcode == 0x8a4 || opcode == 0x891 || opcode == 0x892 || opcode == 0x890 || opcode == 0x290 || opcode == 0x292) {
@@ -318,7 +321,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             }
         }
         const bool uniform_predication = !uniform_predicate_bank && (opcode == 0x899 || opcode == 0xabb || opcode == 0xab9 || opcode == 0xc82 || opcode == 0x882 ||
-            original_opcode == 0x291 || original_opcode == 0x2a4 || original_opcode == 0x2a5 || original_opcode == 0x8a4 || original_opcode == 0x891 || original_opcode == 0x890 || original_opcode == 0x290);
+            original_opcode == 0x291 || original_opcode == 0x2a4 || original_opcode == 0x2a5 || original_opcode == 0x8a4 || original_opcode == 0x891 || original_opcode == 0x890 || original_opcode == 0x290 ||
+            original_opcode == 0x292);
         const u32 native_predicate = insn.Bits(12, 4);
         const bool guarded_uniform = uniform_predication && native_predicate != 7;
         if (guarded_uniform && (native_predicate & 7) == 7)
@@ -1476,12 +1480,16 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             // SM70 encoding: address 24..31 with the .E bit at 72, data 32..39, immediate offset 40..63,
             // type 73..75, ordering 76..79, no predicate output (81..83 = PT), operation 87..90 and no
             // uniform-register addressing (bit 91). Only a zero offset and the captured ADD U32 form pass.
+            // Opt-in group "extra_forms" (build 9, Kirby Air Riders): also RZ data (ADD of zero, an
+            // atomic read of the old value) and a nonzero offset that fits Maxwell ATOM's signed 20 bits.
             const u32 address = insn.Bits(24, 8), data = insn.Bits(32, 8);
-            if (address >= 254 || (address & 1) || data == 255 || insn.Bits(40, 24) ||
-                insn.words[2] != 0x001ee100)
+            const s32 offset = static_cast<s32>(insn.Bits(40, 24) << 8) >> 8;
+            const bool extra = LowerGroupEnabled("extra_forms");
+            if (address >= 254 || (address & 1) || (data == 255 && !extra) || (offset && !extra) ||
+                offset < -(1 << 19) || offset >= (1 << 19) || insn.words[2] != 0x001ee100)
                 return fail(index, "native global register atomic mode");
             emit(0xed00000000000000ULL | predicate | dest | (u64{address} << 8) |
-                (u64{data} << 20) | (u64{1} << 48));
+                (u64{data} << 20) | (u64{static_cast<u32>(offset) & 0xfffffU} << 28) | (u64{1} << 48));
             break;
         }
         case 0x9a8: { // ATOMG.E.ADD.STRONG.GPU U32 through a uniform pointer plus a byte offset.
@@ -1782,6 +1790,9 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             if (insn.words[1] || insn.words[2] != (special << 8) ||
                 (special != 0 && special != 17 && special != 29 && special != 33 && special != 34 && special != 35 &&
                  special != 37 && special != 38 && special != 39 &&
+                 // SR_WSCALEFACTOR_XY/Z (30/31; Kirby Air Riders): the Maxwell S2R maps them to
+                 // SR_WScaleFactor*, like the direct Ampere frontend (ops_misc.cpp). Opt-in "extra_forms".
+                 !((special == 30 || special == 31) && LowerGroupEnabled("extra_forms")) &&
                  special != 56 && special != 57 && special != 58 && special != 59 && special != 60))
                 return fail(index, "native special register");
             const u32 target = opcode == 0x9c3 ? uniform_register(static_cast<u32>(dest)) : static_cast<u32>(dest);
@@ -1854,10 +1865,19 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                 // Bits 64-67 are a reversed predicate operand (index 7 - bits 64-66,
                 // negate in bit 67): when it is false the load returns zero. The default (0) is PT.
                 load_predicate = descriptor_address ? 0U : insn.Bits(64, 4);
+                const bool guard_load = load_predicate && native_predicate != 7 && LowerGroupEnabled("extra_forms");
                 if ((!descriptor_address && (insn.words[2] & ~(0xe00U | 0x04000000U | 0x2000U | 0xfU)) != 0x081e8100) ||
-                    (load_predicate && (native_predicate != 7 || (load_predicate & 7) == 0)) ||
+                    (load_predicate && ((native_predicate != 7 && !guard_load) || (load_predicate & 7) == 0)) ||
                     insn.Bits(38, 2) || uniform_address == ~0U || (uniform_address & 1))
                     return fail(index, "native global load uniform addressing mode");
+                if (guard_load) {
+                    // Opt-in group "extra_forms" (build 9, Yoshi demo): @P LDG ... with its own load
+                    // predicate. Branch over the whole expansion when the instruction predicate is false
+                    // (like the HFMA2.RELU guard), then zero-and-load under the load predicate alone.
+                    relocations.push_back({static_cast<u32>(result.instructions.size()), index + 1});
+                    emit(0xe24000000000000fULL | (u64{native_predicate ^ 8U} << 16));
+                    predicate = u64{7} << 16;
+                }
                 if (descriptor_address) {
                     if ((address & 1) || address + 2 > reserved_register)
                         return fail(index, "native descriptor load address pair");
@@ -4133,7 +4153,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             return fail(index, "unsupported native opcode");
         }
         if (!pressure.prefix.empty() && (original_opcode == 0x231 || original_opcode == 0x431 ||
-            original_opcode == 0x631 || original_opcode == 0x831 || original_opcode == 0xa31)) {
+            original_opcode == 0x631 || original_opcode == 0x831 || original_opcode == 0xa31 ||
+            original_opcode == 0x981)) {
             const u32 first = result.source_instruction_offsets[index] + static_cast<u32>(pressure.prefix.size());
             for (auto& relocation : relocations)
                 if (!relocation.call && relocation.output_index >= first && relocation.target == index + 1)

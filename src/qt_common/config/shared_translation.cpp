@@ -188,6 +188,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Accepts shaders whose functions branch straight to their return instruction\n"
               "(rejected as 'branch bypasses return linkage'), so their draws are not skipped.\n"
               "Experimental; if a game hangs or loses the GPU, turn it off."));
+    INSERT(Settings, ns2_lower_extra_forms,
+           tr("Switch 2 / Eden-NS2: Extra shader forms (build 9)"),
+           tr("Translates more native shader forms that were rejected (their draws skipped):\n"
+              "predicated uniform LOP3, predicated LDG with a load predicate, ATOMG reads with\n"
+              "an offset, and the W-scale special registers. Experimental; enable per game."));
     INSERT(Settings, ns2_lower_isbewr_drop, tr("Switch 2 / Eden-NS2: Drop unskewed ISBEWR (diagnostic)"),
            tr("Drops stage-buffer writes that cannot be translated so the rest of the shader runs.\n"
               "Diagnostic only; may cause wrong output."));
