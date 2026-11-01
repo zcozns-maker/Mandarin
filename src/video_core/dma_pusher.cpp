@@ -259,6 +259,22 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
     return commands.size();
 }
 
+
+namespace {
+// ZiK build11: a guest command sent to a subchannel with no engine bound used to dereference
+// null (Pokopia, 22 min in). Log it once per subchannel/method burst and drop the command.
+std::atomic<u32> g_null_subchannel_logs{0};
+void LogNullSubchannel(u32 subchannel, u32 method, u32 type) {
+    const u32 n = g_null_subchannel_logs.fetch_add(1, std::memory_order_relaxed);
+    if (n < 16 || (n & 0xFFF) == 0) {
+        LOG_ERROR(HW_GPU,
+                  "Dropped GPU method 0x{:X} on subchannel {} with no engine bound (type {}, "
+                  "drop #{})",
+                  method, subchannel, type, n + 1);
+    }
+}
+} // namespace
+
 void DmaPusher::SetState(const CommandHeader& command_header) {
     dma_state.method = command_header.method;
     dma_state.subchannel = command_header.subchannel;
@@ -275,6 +291,11 @@ void DmaPusher::CallMethod(u32 argument) {
         });
     } else {
         auto subchannel = subchannels[dma_state.subchannel];
+        if (subchannel == nullptr) {
+            LogNullSubchannel(dma_state.subchannel, dma_state.method,
+                              static_cast<u32>(subchannel_type[dma_state.subchannel]));
+            return;
+        }
         if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
             const GPUVAddr segment = dma_state.dma_get + dma_state.dma_word_offset;
             if (split.FrontMacros()) {
@@ -314,6 +335,11 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         puller.CallMultiMethod(*this, dma_state.method, dma_state.subchannel, base_start, num_methods, dma_state.method_count);
     } else {
         auto subchannel = subchannels[dma_state.subchannel];
+        if (subchannel == nullptr) {
+            LogNullSubchannel(dma_state.subchannel, dma_state.method,
+                              static_cast<u32>(subchannel_type[dma_state.subchannel]));
+            return;
+        }
         if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
             const GPUVAddr segment = dma_state.dma_get + dma_state.dma_word_offset;
             if (split.FrontMacros()) {

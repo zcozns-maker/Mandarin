@@ -94,7 +94,7 @@ void Puller::ProcessBindMethod(DmaPusher& dma_pusher, const MethodCall& method_c
         dma_pusher.BindSubchannel(&dma_pusher.channel_state.payload->fermi_2d, method_call.subchannel, EngineTypes::Fermi2D);
         break;
     case EngineID::AMPERE_B:
-        if (!dma_pusher.channel_state.native_abi) { UNIMPLEMENTED_MSG("Native GPU class on legacy channel"); return; }
+        if (!dma_pusher.channel_state.native_abi) { LOG_CRITICAL(HW_GPU, "Native GPU class {:04X} bound on a legacy channel (subchannel {}); its methods will be dropped", static_cast<u32>(engine_id), method_call.subchannel); dma_pusher.BindSubchannel(nullptr, method_call.subchannel, EngineTypes::Nv01Timer); return; }
         dma_pusher.channel_state.payload->maxwell_3d.SetNativeTuringMacroMode(true);
         dma_pusher.BindSubchannel(&dma_pusher.channel_state.payload->maxwell_3d, method_call.subchannel, EngineTypes::Maxwell3D);
         break;
@@ -103,7 +103,7 @@ void Puller::ProcessBindMethod(DmaPusher& dma_pusher, const MethodCall& method_c
         dma_pusher.BindSubchannel(&dma_pusher.channel_state.payload->maxwell_3d, method_call.subchannel, EngineTypes::Maxwell3D);
         break;
     case EngineID::AMPERE_COMPUTE_B:
-        if (!dma_pusher.channel_state.native_abi) { UNIMPLEMENTED_MSG("Native GPU class on legacy channel"); return; }
+        if (!dma_pusher.channel_state.native_abi) { LOG_CRITICAL(HW_GPU, "Native GPU class {:04X} bound on a legacy channel (subchannel {}); its methods will be dropped", static_cast<u32>(engine_id), method_call.subchannel); dma_pusher.BindSubchannel(nullptr, method_call.subchannel, EngineTypes::Nv01Timer); return; }
         [[fallthrough]];
     case EngineID::KEPLER_COMPUTE_B:
         if (engine_id == EngineID::AMPERE_COMPUTE_B && dma_pusher.channel_state.native_macro_context) {
@@ -122,7 +122,7 @@ void Puller::ProcessBindMethod(DmaPusher& dma_pusher, const MethodCall& method_c
         dma_pusher.BindSubchannel(&dma_pusher.channel_state.payload->kepler_compute, method_call.subchannel, EngineTypes::KeplerCompute);
         break;
     case EngineID::AMPERE_DMA_COPY_B:
-        if (!dma_pusher.channel_state.native_abi) { UNIMPLEMENTED_MSG("Native GPU class on legacy channel"); return; }
+        if (!dma_pusher.channel_state.native_abi) { LOG_CRITICAL(HW_GPU, "Native GPU class {:04X} bound on a legacy channel (subchannel {}); its methods will be dropped", static_cast<u32>(engine_id), method_call.subchannel); dma_pusher.BindSubchannel(nullptr, method_call.subchannel, EngineTypes::Nv01Timer); return; }
         [[fallthrough]];
     case EngineID::MAXWELL_DMA_COPY_A:
         dma_pusher.BindSubchannel(&dma_pusher.channel_state.payload->maxwell_dma, method_call.subchannel, EngineTypes::MaxwellDMA);
@@ -134,7 +134,13 @@ void Puller::ProcessBindMethod(DmaPusher& dma_pusher, const MethodCall& method_c
         dma_pusher.BindSubchannel(&dma_pusher.channel_state.payload->nv01_timer, method_call.subchannel, EngineTypes::Nv01Timer);
         break;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented engine {:04X}", engine_id);
+        // ZiK build11: say loudly which class left the subchannel without an engine. Methods
+        // sent to it are dropped (DmaPusher logs them) instead of reaching the old engine.
+        LOG_CRITICAL(HW_GPU,
+                     "Bind of unknown/unimplemented GPU class {:04X} on subchannel {}; its "
+                     "methods will be dropped",
+                     static_cast<u32>(engine_id), method_call.subchannel);
+        dma_pusher.BindSubchannel(nullptr, method_call.subchannel, EngineTypes::Nv01Timer);
         break;
     }
 }

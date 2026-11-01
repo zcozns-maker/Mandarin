@@ -186,7 +186,7 @@ public:
 
     DmaState dma_state{};
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
-    std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
+    std::array<Engines::EngineTypes, max_subchannels> subchannel_type{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;
