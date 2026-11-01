@@ -437,7 +437,7 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     // Mario Kart World runs small command lists its culling dispatches fill in each frame. Safe
     // reads flush every command list; unsafe ones only flush those on pages the GPU has written,
     // or their draws run with an older frame's words. Only those pages wait for the split's back.
-    if (!g_nx2_ampere.load(std::memory_order_relaxed) || size == 0) {
+    if (size == 0 || !Nx2IsSwitch2Gpu() || !Settings::values.ns2_gpu_written_cmd_flush.GetValue()) {
         return false;
     }
     bool written = false;
@@ -457,11 +457,18 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
         return false;
     }
     memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
+    // ZiK build14 diagnostic: show that the GPU-written command-list flush runs.
+    static std::atomic<u64> nx2_cmd_flushes{0};
+    const u64 flushes = nx2_cmd_flushes.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (flushes == 1 || (flushes >= 1024 && (flushes & (flushes - 1)) == 0)) {
+        LOG_INFO(HW_GPU, "NS2 GPU-written command lists: {} flushed so far (gpu={:#x})", flushes,
+                 address);
+    }
     return true;
 }
 
 void DmaPusher::FlushGpuWrittenCommandData(GPUVAddr address, size_t size, bool flush) {
-    if (!g_nx2_ampere.load(std::memory_order_relaxed) || size == 0 || rasterizer == nullptr) {
+    if (size == 0 || rasterizer == nullptr || !Nx2TrackGpuWritten()) {
         return;
     }
     if (!pb_announced.exchange(true)) {

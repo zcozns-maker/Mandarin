@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/settings.h"
 
 namespace Tegra {
 
@@ -49,6 +50,21 @@ inline void Nx2ClearGpuWrittenPages() {
     for (auto& word : g_nx2_gpu_written_pages) {
         word.store(0, std::memory_order_relaxed);
     }
+}
+
+// ZiK build14: whether the GPU-written page map is kept. g_nx2_ampere is never set (setting it
+// would also switch channel_state/puller paths), so Switch 2 titles are recognised the way the
+// GPU thread split does it: g_nx2_ampere || g_native_channels. Per-game: ns2_gpu_written_cmd_flush
+// (and ns2_pb_flush_all_caches, whose targeted flush needs the map).
+// Idea and command-list flush ported from Eglantine d151e53e61 (Takoroka), GPL-3.0-or-later.
+[[nodiscard]] inline bool Nx2IsSwitch2Gpu() {
+    return g_nx2_ampere.load(std::memory_order_relaxed) ||
+           g_native_channels.load(std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline bool Nx2TrackGpuWritten() {
+    return Nx2IsSwitch2Gpu() && (Settings::values.ns2_gpu_written_cmd_flush.GetValue() ||
+                                 Settings::values.ns2_pb_flush_all_caches.GetValue());
 }
 
 [[nodiscard]] inline bool Nx2IsGpuWritten(u64 device_address) {

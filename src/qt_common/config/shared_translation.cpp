@@ -266,6 +266,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "that is still only in a host cache (textures, queries, buffers), as Safe DMA does, but\n"
               "only for those parts and without stopping the GPU thread split. Logs what it finds\n"
               "(\"NS2 PB data\"). For DK Bananza's black ground."));
+    INSERT(Settings, ns2_gpu_written_cmd_flush,
+           tr("Switch 2 / Eden-NS2: read GPU-written command lists from the GPU's copy"),
+           tr("Tracks the pages the GPU writes and, before a command list on such a page is read,\n"
+              "waits for the GPU thread and copies the buffer cache's data back (Eglantine d151e53e61).\n"
+              "The code was in Eden-NS2 but never ran: its Switch 2 check was never set. Needed for the\n"
+              "flush above to find anything. Can cost some speed."));
     INSERT(Settings, ns2_hang_dump_seconds, tr("Switch 2 / Eden-NS2: Hang dump after (s, 0 = off)"),
            tr("When no frame is shown for this many seconds, writes what every game thread is waiting on to the log.\n"
               "Diagnostic only."));

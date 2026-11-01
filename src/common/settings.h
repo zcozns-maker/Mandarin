@@ -649,6 +649,12 @@ struct Values {
     // and the GPU thread split keeps running. DK Bananza's ground needs Safe DMA otherwise.
     SwitchableSetting<bool> ns2_pb_flush_all_caches{linkage, false, "ns2_pb_flush_all_caches",
                                                     Category::RendererAdvanced};
+    // ZiK build14: the GPU-written page map (video_core/nx2.h) and the flush of command lists the
+    // GPU wrote (DmaPusher::FlushGpuWrittenCommands) were gated on g_nx2_ampere, which nothing
+    // sets, so they never ran. With this on they run for Switch 2 titles (native channels), as
+    // the GPU thread split already does. Off by default; per-game.
+    SwitchableSetting<bool> ns2_gpu_written_cmd_flush{linkage, false, "ns2_gpu_written_cmd_flush",
+                                                      Category::RendererAdvanced};
     // ZiK build11: copy every GPU-written buffer back to guest memory at fences (Switch 2
     // titles skip this by default for speed). Pokopia's sky needs it (Zortos 60ef6d2750).
     SwitchableSetting<bool> ns2_buffer_downloads{linkage, false, "ns2_buffer_downloads",
