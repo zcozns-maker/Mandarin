@@ -1288,12 +1288,17 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             break;
         }
         case 0xb82: { // LDC, 8 to 64 bits (U8/S8/U16/S16/32/64, Maxwell's order), indexed byte offset
+            // ZiK build11: mode 2 (bits 78-79) is the indexed-segmented form (LDC.IS: the high half
+            // of Ra + offset picks the bank). Maxwell's LDC has the same mode at bits 44-45 and the
+            // translator already handles it. Mode decode from zortos293/Eglantine 60ef6d2750 (GPL).
             const u32 width = insn.Bits(73, 3);
-            if (width > 5 || insn.Bits(78, 2) || insn.Bits(91, 1) ||
+            const u32 mode = insn.Bits(78, 2);
+            if (width > 5 || (mode != 0 && mode != 2) || insn.Bits(91, 1) ||
                 insn.Bits(54, 5) >= 18 ||
                 (width == 5 && ((dest & 1) || dest >= 254))) return fail(index, "native indexed constant load mode");
             emit(base(0xef90000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
-                 (u64{insn.Bits(38, 16)} << 20) | (u64{insn.Bits(54, 5)} << 36) | (u64{width} << 48));
+                 (u64{insn.Bits(38, 16)} << 20) | (u64{insn.Bits(54, 5)} << 36) |
+                 (u64{mode} << 44) | (u64{width} << 48));
             break;
         }
         case 0xf89: { // SHFL.IDX/BFLY with immediate lane and segmentation mask.
