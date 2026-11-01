@@ -406,6 +406,17 @@ void Filter::ParseFilterString(std::string_view filter_view) {
     }
 }
 
+#ifdef _WIN32
+namespace {
+// ZiK build11: a crash never runs the backends' destructors, so lines still in the file buffers
+// were lost (Pokopia lost its last ~8 seconds). Flush every backend from the unhandled exception
+// filter, after logging the exception itself, then hand over to the previous filter / WER.
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+std::atomic_bool g_in_crash_filter{false};
+LONG WINAPI CrashFlushFilter(EXCEPTION_POINTERS* info);
+} // namespace
+#endif
+
 // Constructor shall NOT depend upon Settings() or whatever
 // it's ran at global static ctor() time... so BE CAREFUL MFER!
 static std::optional<Common::Log::Impl> logging_instance{};
@@ -422,8 +433,60 @@ void Initialize() {
         void(CreateDir(log_dir));
         logging_instance->file_backend.emplace(log_dir / LOG_FILE);
 #endif
+#ifdef _WIN32
+        g_previous_filter = SetUnhandledExceptionFilter(CrashFlushFilter);
+#endif
     }
 }
+
+void FlushAll() noexcept {
+    if (!logging_instance)
+        return;
+    logging_instance->color_console_backend.Flush();
+#ifndef __OPENORBIS__
+    if (logging_instance->file_backend)
+        logging_instance->file_backend->Flush();
+    if (logging_instance->has_game_backend.load(std::memory_order_acquire)) {
+        // The crashing thread may hold the lock; never block inside a crash.
+        std::unique_lock lock{logging_instance->game_backend_mutex, std::try_to_lock};
+        if (lock.owns_lock() && logging_instance->game_backend)
+            logging_instance->game_backend->Flush();
+    }
+#endif
+}
+
+#ifdef _WIN32
+namespace {
+LONG WINAPI CrashFlushFilter(EXCEPTION_POINTERS* info) {
+    if (!g_in_crash_filter.exchange(true)) {
+        const auto* record = info ? info->ExceptionRecord : nullptr;
+        if (record) {
+            HMODULE module = nullptr;
+            char module_name[MAX_PATH] = "?";
+            const auto address = reinterpret_cast<std::uintptr_t>(record->ExceptionAddress);
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   static_cast<LPCSTR>(record->ExceptionAddress), &module)) {
+                GetModuleFileNameA(module, module_name, sizeof(module_name));
+            }
+            const auto base = reinterpret_cast<std::uintptr_t>(module);
+            const std::uintptr_t access_kind =
+                record->NumberParameters >= 2 ? record->ExceptionInformation[0] : 99;
+            const std::uintptr_t access_address =
+                record->NumberParameters >= 2 ? record->ExceptionInformation[1] : 0;
+            LOG_CRITICAL(Log,
+                         "Unhandled exception 0x{:08X} at {:#x} ({}+{:#x}); access kind {} "
+                         "address {:#x}. Log flushed before exit.",
+                         static_cast<std::uint32_t>(record->ExceptionCode), address,
+                         module_name, module ? address - base : 0, access_kind,
+                         access_address);
+        }
+        FlushAll();
+    }
+    return g_previous_filter ? g_previous_filter(info) : EXCEPTION_CONTINUE_SEARCH;
+}
+} // namespace
+#endif
 
 void Start() {
 }
