@@ -20,6 +20,8 @@
 // a driver update). EDEN_NS2_NO_PIPELINE_GUARD=1 turns the guard off.
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -192,10 +194,31 @@ inline void MarkSuspect(u64 hash) {
     s.suspects.insert(hash);
 }
 
+/// ZiK build11: one driver compile (or a wait for the crash guard's build lock) over 5 s is
+/// logged as a warning, so a long freeze can be tied to a pipeline (Pokopia froze 34 s at 2204 s
+/// while 7 pipelines were built).
+inline void ReportSlowCompile(const char* kind, u64 hash,
+                              std::chrono::steady_clock::duration waited,
+                              std::chrono::steady_clock::duration built) {
+    using namespace std::chrono;
+    static std::atomic<u32> reported{0};
+    if (waited < seconds{5} && built < seconds{5}) {
+        return;
+    }
+    if (reported.fetch_add(1, std::memory_order_relaxed) >= 200) {
+        return;
+    }
+    LOG_WARNING(Render_Vulkan,
+                "Slow pipeline: {} {:016x} took {:.1f} s in the driver after waiting {:.1f} s "
+                "for the build lock",
+                kind, hash, duration<double>(built).count(), duration<double>(waited).count());
+}
+
 /// Scope of one driver compile.
 class Scope {
 public:
     Scope(u64 hash_, const std::array<u64, 6>& stages) : hash{hash_} {
+        const auto wait_begin = std::chrono::steady_clock::now();
         State& s = GetState();
         bool solo{};
         {
@@ -214,8 +237,12 @@ public:
         std::scoped_lock lock{s.mutex};
         s.in_flight[hash] = InFlight{solo, stages};
         WriteInFlight(s);
+        build_begin = std::chrono::steady_clock::now();
+        waited = build_begin - wait_begin;
     }
     ~Scope() {
+        ReportSlowCompile(exclusive ? "graphics (suspect, built alone)" : "graphics", hash, waited,
+                          std::chrono::steady_clock::now() - build_begin);
         if (!active) {
             return;
         }
@@ -238,6 +265,8 @@ public:
 private:
     u64 hash{};
     bool active{};
+    std::chrono::steady_clock::time_point build_begin{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::duration waited{};
     std::optional<std::unique_lock<std::shared_mutex>> exclusive;
     std::optional<std::shared_lock<std::shared_mutex>> shared;
 };

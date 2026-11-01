@@ -231,6 +231,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ns2_undef_zero, tr("Switch 2 / Eden-NS2: Undefined shader values as zero"),
            tr("Shader values the game never wrote read as 0, as on NVIDIA/Switch hardware, instead of\n"
               "driver garbage. Fixes green/blue patches on AMD. Recommended on."));
+    INSERT(Settings, ns2_serial_pipelines,
+           tr("Switch 2 / Eden-NS2: Build pipelines one at a time (AMD Windows)"),
+           tr("Compiles graphics/compute pipelines one at a time on AMD's Windows driver, which can\n"
+              "crash compiling some pipelines in parallel (PokeDinner PR 19). Slower first loads.\n"
+              "Only affects the AMD proprietary driver. Takes effect on the next game start."));
     INSERT(Settings, ns2_hang_dump_seconds, tr("Switch 2 / Eden-NS2: Hang dump after (s, 0 = off)"),
            tr("When no frame is shown for this many seconds, writes what every game thread is waiting on to the log.\n"
               "Diagnostic only."));

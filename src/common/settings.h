@@ -625,6 +625,10 @@ struct Values {
     // AMD fills with garbage (green/blue patches). On by default; EDEN_NX2_UNDEF_ZERO=0 forces off.
     SwitchableSetting<bool> ns2_undef_zero{linkage, true, "ns2_undef_zero",
                                            Category::RendererAdvanced};
+    // ZiK build11: PokeDinner PR 19's serialized pipeline compiles on AMD's Windows driver, per
+    // game (off by default: slower first loads). EDEN_NS2_SERIAL_PIPELINES=1/0 still overrides.
+    SwitchableSetting<bool> ns2_serial_pipelines{linkage, false, "ns2_serial_pipelines",
+                                                 Category::RendererAdvanced};
     // A pipeline the crash guard blacklisted that has a geometry shader is built again without
     // it instead of skipping its draws (AMD crashes on emulated passthrough geometry shaders).
     SwitchableSetting<bool> ns2_drop_crashed_gs{linkage, false, "ns2_drop_crashed_gs",

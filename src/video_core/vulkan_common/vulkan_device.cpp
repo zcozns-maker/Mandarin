@@ -469,14 +469,18 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // so Eden-NS2 keeps parallel compiles unless EDEN_NS2_SERIAL_PIPELINES=1 is set (the crash
     // guard already isolates a crashing pipeline).
 #ifdef _WIN32
+    // ZiK build11: per-game setting ns2_serial_pipelines; the env var (1 or 0) still overrides.
     has_broken_parallel_compiling = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && [] {
         const char* value = std::getenv("EDEN_NS2_SERIAL_PIPELINES");
-        return value != nullptr && value[0] == '1';
+        if (value != nullptr && (value[0] == '1' || value[0] == '0')) {
+            return value[0] == '1';
+        }
+        return Settings::values.ns2_serial_pipelines.GetValue();
     }();
 #endif
     if (has_broken_parallel_compiling) {
         LOG_WARNING(Render_Vulkan, "AMD proprietary driver: serializing pipeline compilation "
-                                   "(EDEN_NS2_SERIAL_PIPELINES=1)");
+                                   "(ns2_serial_pipelines / EDEN_NS2_SERIAL_PIPELINES)");
     }
 
     const bool is_intel_windows = driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;

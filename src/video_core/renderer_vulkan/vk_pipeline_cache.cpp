@@ -1187,7 +1187,11 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
     total += elapsed;
     ++count;
     const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
-    if (elapsed > std::chrono::milliseconds{2} && logged < 400) {
+    if (elapsed > std::chrono::seconds{5}) {
+        // ZiK build11: the GPU thread (and the game) is frozen while this runs.
+        LOG_WARNING(Render_Vulkan, "Slow pipeline: {} pipeline took {:.1f} s on the GPU thread",
+                    kind, ms(elapsed) / 1000.0);
+    } else if (elapsed > std::chrono::milliseconds{2} && logged < 400) {
         ++logged;
         LOG_DEBUG(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms", kind, ms(elapsed));
     }
