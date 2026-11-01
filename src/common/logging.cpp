@@ -7,6 +7,8 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <exception>
+#include <string>
 #include <cstdlib>
 #include <mutex>
 #include <regex>
@@ -436,6 +438,28 @@ void Initialize() {
 #ifdef _WIN32
         g_previous_filter = SetUnhandledExceptionFilter(CrashFlushFilter);
 #endif
+        // ZiK build11: an uncaught C++ exception ends in std::terminate -> abort, a fail-fast
+        // (0xc0000409) the exception filter never sees. Log what was thrown and flush first.
+        static std::terminate_handler previous_terminate = std::set_terminate([] {
+            std::string what = "unknown";
+            if (const auto exception = std::current_exception()) {
+                try {
+                    std::rethrow_exception(exception);
+                } catch (const std::exception& e) {
+                    what = e.what();
+                } catch (...) {
+                    what = "non-std exception";
+                }
+            } else {
+                what = "no active exception";
+            }
+            LOG_CRITICAL(Log, "std::terminate called ({}); log flushed before abort", what);
+            FlushAll();
+            if (previous_terminate) {
+                previous_terminate();
+            }
+            std::abort();
+        });
     }
 }
 
