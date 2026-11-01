@@ -1152,8 +1152,25 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     if (memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
         memory_manager.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
     }
+    // ZiK build12: port of upstream Eden-NS2 69debf7d76 (0x2593, "Fix black 3D scene in DK
+    // Bananza caves") to the split front's DMA read. The GPU reads what the semaphore releases
+    // before it wrote (title 4 keeps "clear pending" flags that way). The Drain above already ran
+    // every release sent to the back (stronger than upstream's AwaitReleases); a release that
+    // still waits for the host GPU's fence (native fence releases, accurate GPU) is only in the
+    // query cache's pending releases, so small reads (<= 256 bytes, as upstream) take it from
+    // there. PendingSemaphoreRelease is guarded by the query cache's pending_releases_mutex, and
+    // the puller already calls it from this thread after a drain (CanResumeNativeAcquire).
+    const auto read_word = [&](GPUVAddr address) {
+        if (const auto device = read_bytes <= 256 ? memory_manager.GpuToCpuAddress(address)
+                                                  : std::nullopt) {
+            if (const auto pending = rasterizer->PendingSemaphoreRelease(*device)) {
+                return *pending;
+            }
+        }
+        return memory_manager.Read<u32>(address);
+    };
     for (u32 i = 0; i < words; ++i) {
-        const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+        const u32 word = read_word(source + u64{i} * sizeof(u32));
         if (method == 0x158) {
             fs.fifo.push_back(word);
         } else if (ram + i < native_data_ram.size()) {
