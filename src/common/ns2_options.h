@@ -54,6 +54,7 @@ inline bool LowerGroupEnabled(std::string_view group) {
     if (group == "audit_fsel") return v.ns2_lower_audit_fsel.GetValue();
     if (group == "ret_branch") return v.ns2_lower_ret_branch.GetValue();
     if (group == "extra_forms") return v.ns2_lower_extra_forms.GetValue();
+    if (group == "csmtest_noop") return v.ns2_lower_csmtest_noop.GetValue();
     return false;
 }
 

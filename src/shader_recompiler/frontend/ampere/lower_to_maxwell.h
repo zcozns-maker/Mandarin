@@ -223,7 +223,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
     const auto writes_link = [](const Instruction& instruction, u32 link) {
         const u32 op = instruction.Bits(0, 12);
         if (op == 0x20c || op == 0x80c || op == 0xa0c || op == 0xc0c ||
-            op == 0x20b || op == 0x80b || op == 0xa0b || op == 0x918 || op == 0x947 || op == 0x950) return false;
+            op == 0x20b || op == 0x80b || op == 0xa0b || op == 0x918 || op == 0x947 || op == 0x950 ||
+            op == 0x80d) return false; // CSMTEST has no register destination.
         const u32 destination = instruction.Bits(16, 8);
         const u32 count = op == 0x83b ? 4U : op == 0x23c || op == 0x225 || op == 0x625 || op == 0x311 ? 2U : 1U;
         return destination != 255 && link >= destination && link - destination < count;
@@ -4214,6 +4215,27 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                 if (target <= index) return fail(index, "native call target overlaps main program");
             }
             main_exited = true;
+            break;
+        }
+        case 0x80d: {
+            // CSMTEST ("Clip State Machine Test and Update"; VOTE_VTG shares the opcode), valid only in
+            // VTG stages. ZiK build11b, per-game ns2_lower_csmtest_noop (off by default). Evidence:
+            // NVIDIA's public nvdisasm (CUDA 13.4, SM75-SM90) decodes Kirby Air Riders' instances
+            // [0000780d c4321111 03fe0000 ...] as "CSMTEST.RA.F.AND PT, PT, 0x4321111, PT", and its
+            // machine description (as dumped by github.com/edmcman/nvdisasm-re) defines this exact
+            // form, class "csmtest_", with Pu=PT, Pv(cop)=PT, Pp=PT, bop=AND and ccmp=F fixed: its only
+            // operands are the guard predicate (read) and a 28-bit immediate. It writes no register
+            // and no predicate; the only effect is on fixed-function clip-state hardware that the
+            // shader cannot read except through further CSMTEST/VOTE_VTG tests, which stay rejected.
+            // Vulkan does its own clipping, so dropping the update is an approximation of hardware,
+            // not a decode of the hidden state. Fields: Pg 12-15, Sa 32-59, vtgmode 62-63,
+            // bop 74-75, ccmp 76-78, Pu 81-83, Pv 84-86, Pp 87-89, !Pp 90.
+            const bool no_outputs = (insn.words[0] & ~0xf000U) == 0x80d &&
+                                    ((insn.words[1] >> 28) & 3) == 0 && (insn.words[1] >> 30) != 0 &&
+                                    insn.words[2] == 0x03fe0000U;
+            if (!no_outputs) return fail(index, "native CSMTEST/VOTE_VTG with predicate outputs");
+            if (!LowerGroupEnabled("csmtest_noop")) return fail(index, "unsupported native opcode");
+            emit(0x50b0000000000f00ULL | predicate); // NOP; writes nothing visible to the shader.
             break;
         }
         default:

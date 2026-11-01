@@ -608,6 +608,9 @@ struct Values {
                                                   Category::RendererAdvanced};
     SwitchableSetting<bool> ns2_lower_audit_fsel{linkage, false, "ns2_lower_audit_fsel",
                                                  Category::RendererAdvanced};
+    // ZiK build11b: treat the no-output CSMTEST form (opcode 0x80d) as a NOP (Kirby Air Riders).
+    SwitchableSetting<bool> ns2_lower_csmtest_noop{linkage, false, "ns2_lower_csmtest_noop",
+                                                   Category::RendererAdvanced};
     SwitchableSetting<u32, true> ns2_fence_timeout_ms{linkage,
                                                       0,
                                                       0,

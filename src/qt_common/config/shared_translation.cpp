@@ -188,6 +188,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Accepts shaders whose functions branch straight to their return instruction\n"
               "(rejected as 'branch bypasses return linkage'), so their draws are not skipped.\n"
               "Experimental; if a game hangs or loses the GPU, turn it off."));
+    INSERT(Settings, ns2_lower_csmtest_noop,
+           tr("Switch 2 / Eden-NS2: experimental 0x80d decode (approximation: ignore no-output CSMTEST)"),
+           tr("Opcode 0x80d is CSMTEST (clip state machine test/update). Its form with no outputs\n"
+              "writes no register or predicate, so it is translated as a no-op instead of rejecting\n"
+              "the whole shader (Kirby Air Riders' skipped draws). The hidden clip-state update is not\n"
+              "emulated; forms with predicate outputs stay rejected. Enable per game."));
     INSERT(Settings, ns2_lower_extra_forms,
            tr("Switch 2 / Eden-NS2: Extra shader forms (build 9)"),
            tr("Translates more native shader forms that were rejected (their draws skipped):\n"
