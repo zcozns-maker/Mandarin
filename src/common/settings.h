@@ -637,6 +637,12 @@ struct Values {
     // DMA / High GPU accuracy already force). Off by default.
     SwitchableSetting<bool> ns2_disable_gpu_split{linkage, false, "ns2_disable_gpu_split",
                                                   Category::RendererAdvanced};
+    // ZiK build13: Turing MME DMA reads (macros reading GPU-written words) take a semaphore
+    // release still waiting for its host fence from the query cache (upstream 69debf7d76, and
+    // build12's split-front port). Off by default: in DK Bananza it coincides with the HUD
+    // flickering, without fixing the black ground.
+    SwitchableSetting<bool> ns2_mme_pending_release{linkage, false, "ns2_mme_pending_release",
+                                                    Category::RendererAdvanced};
     // ZiK build11: copy every GPU-written buffer back to guest memory at fences (Switch 2
     // titles skip this by default for speed). Pokopia's sky needs it (Zortos 60ef6d2750).
     SwitchableSetting<bool> ns2_buffer_downloads{linkage, false, "ns2_buffer_downloads",

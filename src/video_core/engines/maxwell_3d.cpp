@@ -1160,8 +1160,13 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     // query cache's pending releases, so small reads (<= 256 bytes, as upstream) take it from
     // there. PendingSemaphoreRelease is guarded by the query cache's pending_releases_mutex, and
     // the puller already calls it from this thread after a drain (CanResumeNativeAcquire).
+    // ZiK build13: only with ns2_mme_pending_release (off by default, HUD flicker in DK Bananza).
+    // Off, the words come from guest memory after the drain and buffer flush above, as before
+    // build12.
+    const bool take_pending =
+        read_bytes <= 256 && Settings::values.ns2_mme_pending_release.GetValue();
     const auto read_word = [&](GPUVAddr address) {
-        if (const auto device = read_bytes <= 256 ? memory_manager.GpuToCpuAddress(address)
+        if (const auto device = take_pending ? memory_manager.GpuToCpuAddress(address)
                                                   : std::nullopt) {
             if (const auto pending = rasterizer->PendingSemaphoreRelease(*device)) {
                 return *pending;

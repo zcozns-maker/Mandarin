@@ -1430,8 +1430,13 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active() && split.FrontMacros()) {
                         split.AwaitReleases(source, dma_bytes);
                     }
+                    // ZiK build13: the pending-release lookup only with ns2_mme_pending_release (off by
+                    // default). AwaitReleases above stays: it only waits for the back to run releases
+                    // already sent, so guest memory is in order; it never hands out a future value.
+                    const bool take_pending =
+                        dma_bytes <= 256 && Settings::values.ns2_mme_pending_release.GetValue();
                     const auto read_word = [&](GPUVAddr address) {
-                        if (const auto device = dma_bytes <= 256 ? memory.GpuToCpuAddress(address)
+                        if (const auto device = take_pending ? memory.GpuToCpuAddress(address)
                                                                  : std::nullopt) {
                             if (const auto pending = maxwell3d.Rasterizer().PendingSemaphoreRelease(*device)) {
                                 return *pending;

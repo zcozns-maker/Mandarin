@@ -254,6 +254,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Runs all GPU command processing on one thread (same as EDEN_NX2_SPLIT=0, and what\n"
               "Safe DMA or High GPU accuracy already do). Slower, but avoids timing issues of the\n"
               "split. Fallback if a game's graphics only look right with Safe DMA / High accuracy."));
+    INSERT(Settings, ns2_mme_pending_release,
+           tr("Switch 2 / Eden-NS2: macro memory reads take fence-pending semaphore values"),
+           tr("When a GPU macro reads memory that a semaphore release will write once the host GPU\n"
+              "reaches a fence, it takes that pending value instead of what guest memory holds now\n"
+              "(upstream Eden-NS2 69debf7d76, for DK Bananza caves). Off by default: in DK Bananza it\n"
+              "coincides with the HUD flickering."));
     INSERT(Settings, ns2_hang_dump_seconds, tr("Switch 2 / Eden-NS2: Hang dump after (s, 0 = off)"),
            tr("When no frame is shown for this many seconds, writes what every game thread is waiting on to the log.\n"
               "Diagnostic only."));
