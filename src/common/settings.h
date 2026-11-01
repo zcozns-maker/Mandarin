@@ -633,6 +633,10 @@ struct Values {
     // game (off by default: slower first loads). EDEN_NS2_SERIAL_PIPELINES=1/0 still overrides.
     SwitchableSetting<bool> ns2_serial_pipelines{linkage, false, "ns2_serial_pipelines",
                                                  Category::RendererAdvanced};
+    // ZiK build12: per-game equivalent of EDEN_NX2_SPLIT=0 (all GPU work on one thread, as Safe
+    // DMA / High GPU accuracy already force). Off by default.
+    SwitchableSetting<bool> ns2_disable_gpu_split{linkage, false, "ns2_disable_gpu_split",
+                                                  Category::RendererAdvanced};
     // ZiK build11: copy every GPU-written buffer back to guest memory at fences (Switch 2
     // titles skip this by default for speed). Pokopia's sky needs it (Zortos 60ef6d2750).
     SwitchableSetting<bool> ns2_buffer_downloads{linkage, false, "ns2_buffer_downloads",

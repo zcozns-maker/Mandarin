@@ -104,12 +104,14 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     // mid-game: hand the engines back to the front (and start again when they allow it).
     const bool safe_reads = Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh()
                                                           : Settings::IsDMALevelSafe();
+    // ZiK build12: per-game "disable GPU thread split" (EDEN_NX2_SPLIT=0 as a setting).
     const bool allowed = !safe_reads && !Settings::IsGPULevelHigh() &&
+                         !Settings::values.ns2_disable_gpu_split.GetValue() &&
                          Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
     if (active && !allowed) {
         Drain();
         Stop();
-        LOG_INFO(HW_GPU, "GPU thread split: stopped, the accuracy settings need the caches on the front");
+        LOG_INFO(HW_GPU, "GPU thread split: stopped, the accuracy settings (or ns2_disable_gpu_split) need the caches on the front");
         return;
     }
     if (active || !allowed) {

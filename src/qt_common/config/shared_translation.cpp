@@ -249,6 +249,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Compiles graphics/compute pipelines one at a time on AMD's Windows driver, which can\n"
               "crash compiling some pipelines in parallel (PokeDinner PR 19). Slower first loads.\n"
               "Only affects the AMD proprietary driver. Takes effect on the next game start."));
+    INSERT(Settings, ns2_disable_gpu_split,
+           tr("Switch 2 / Eden-NS2: disable GPU thread split"),
+           tr("Runs all GPU command processing on one thread (same as EDEN_NX2_SPLIT=0, and what\n"
+              "Safe DMA or High GPU accuracy already do). Slower, but avoids timing issues of the\n"
+              "split. Fallback if a game's graphics only look right with Safe DMA / High accuracy."));
     INSERT(Settings, ns2_hang_dump_seconds, tr("Switch 2 / Eden-NS2: Hang dump after (s, 0 = off)"),
            tr("When no frame is shown for this many seconds, writes what every game thread is waiting on to the log.\n"
               "Diagnostic only."));
