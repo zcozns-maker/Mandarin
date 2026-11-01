@@ -2252,11 +2252,17 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8);
             if ((insn.words[1] & ~0xffU) == 0x38000000) {
                 const bool offset = insn.Bits(76, 1);
-                if ((insn.words[2] & ~(0x04000000U | 0x1000U)) != 0x001e01ff ||
-                    (a & 1) || a > 248 || b > (offset ? 252U : 253U) || dest > 247)
+                // Build 10: any component mask that fits the first destination pair, and the
+                // zero-LOD form (bit 87; Yoshi's demo), not only .R with automatic LOD.
+                const u32 mask2d = insn.Bits(72, 4), lod2d = insn.Bits(87, 3);
+                const u32 count2d = std::popcount(mask2d);
+                if ((insn.words[2] & ~(0x04000000U | 0x00800000U | 0xf00U | 0x1000U)) != 0x001e00ff ||
+                    !mask2d || count2d > 2 || lod2d > 1 ||
+                    (a & 1) || a > 248 || b > (offset ? 252U : 253U) || dest + count2d > 248 ||
+                    (count2d > 1 && (dest & 1)))
                     return fail(index, "native bindless 2D sample mode");
                 emit(0xde80000000000000ULL | predicate | dest | (u64{a} << 8) |
-                     (u64{b} << 20) | (u64{2} << 28) | (u64{1} << 31) |
+                     (u64{b} << 20) | (u64{2} << 28) | (u64{mask2d} << 31) | (u64{lod2d} << 37) |
                      (u64{offset} << 36) | (u64{7} << 51) | (u64{insn.Bits(90, 1)} << 49));
                 break;
             }
@@ -2357,7 +2363,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const u32 mask = insn.Bits(72, 4), count = std::popcount(mask);
             const bool split = second_dest != 255;
             if (!insn.Bits(91, 1) || insn.Bits(46, 14) != 0 || !insn.Bits(60, 1) ||
-                insn.Bits(61, 3) != 1 || mask == 0 || insn.Bits(76, 5) != 0 || insn.Bits(81, 3) != 7 ||
+                (insn.Bits(61, 3) != 1 && insn.Bits(61, 3) != 5) || mask == 0 || insn.Bits(76, 5) != 0 || insn.Bits(81, 3) != 7 ||
                 insn.Bits(84, 3) != 1 || insn.Bits(89, 1) != 0 || insn.Bits(87, 2) > 3 ||
                 (split ? count < 3 : count > 2) || dest + 1 >= reserved_register ||
                 (count > 1 && (dest & 1)) ||
@@ -2367,15 +2373,25 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
                 return fail(index, "native uniform gather mode");
             }
             const u32 handle = uniform_register(uniform_handle);
+            // Build 10: 2D arrays too (Yoshi's demo). Scalar operands [layer, x, y] are split
+            // Ra, Ra+1, Rb (Mesa NAK); Maxwell wants them consecutive, layer first.
+            const bool gather_array = insn.Bits(61, 3) == 5;
             u32 coordinates = source_a;
-            if (source_b != source_a + 1) {
+            if (gather_array) {
+                if (source_a + 1 >= reserved_register)
+                    return fail(index, "native uniform gather mode");
+                emit(0x5c98000000000000ULL | predicate | 244 | (u64{source_a} << 20) | (u64{15} << 39));
+                emit(0x5c98000000000000ULL | predicate | 245 | (u64{source_a + 1} << 20) | (u64{15} << 39));
+                emit(0x5c98000000000000ULL | predicate | 246 | (u64{source_b} << 20) | (u64{15} << 39));
+                coordinates = 244;
+            } else if (source_b != source_a + 1) {
                 emit(0x5c98000000000000ULL | predicate | 250 | (u64{source_a} << 20) | (u64{15} << 39));
                 emit(0x5c98000000000000ULL | predicate | 251 | (u64{source_b} << 20) | (u64{15} << 39));
                 coordinates = 250;
             }
             // TLD4 (b): handle in the meta register, component in bits 38-39.
             emit(0xdec0000000000000ULL | predicate | 250 | (u64{coordinates} << 8) |
-                 (u64{handle} << 20) | (u64{2} << 28) | (u64{mask} << 31) |
+                 (u64{handle} << 20) | (u64{gather_array ? 3U : 2U} << 28) | (u64{mask} << 31) |
                  (u64{insn.Bits(87, 2)} << 38) | (u64{insn.Bits(90, 1)} << 49) | (u64{7} << 51));
             for (u32 component = 0; component < count; ++component)
                 emit(0x5c98000000000000ULL | predicate |
@@ -2945,8 +2961,10 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             // EDEN_NATIVE_LOWER_ENABLE=local_vector_spill.
             u32 size_code = 4;
             u32 words2 = insn.words[2];
-            if (const u32 memory_size = (words2 >> 9) & 7; (memory_size == 5 || memory_size == 6) &&
-                LowerGroupEnabled("local_vector_spill")) {
+            // Build 10: on by default (it was opt-in; Kirby and Pokopia ran with it, and Yoshi's
+            // demo skipped 70k+ compute dispatches without it). EDEN_NATIVE_LOWER_ENABLE still
+            // overrides the per-game setting for debugging.
+            if (const u32 memory_size = (words2 >> 9) & 7; (memory_size == 5 || memory_size == 6)) {
                 size_code = memory_size;
                 words2 = (words2 & ~0xe00U) | 0x800U;
             }
