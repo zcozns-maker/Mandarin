@@ -95,6 +95,7 @@ public:
     void Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) override;
     std::optional<u32> PendingSemaphoreRelease(DAddr addr) override;
+    u32 Ns2DirtyCaches(DAddr addr, u64 size) override;
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size) override;
     void DisableGraphicsUniformBuffer(size_t stage, u32 index) override;
     void FlushAll() override;

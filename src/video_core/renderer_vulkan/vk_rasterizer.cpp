@@ -1449,6 +1449,28 @@ std::optional<u32> RasterizerVulkan::PendingSemaphoreRelease(DAddr addr) {
     return query_cache.PendingRelease(addr);
 }
 
+u32 RasterizerVulkan::Ns2DirtyCaches(DAddr addr, u64 size) {
+    // ZiK build13 (ns2_pb_flush_all_caches). MustFlushRegion skips the texture cache below High
+    // GPU accuracy; Safe DMA's FlushRegion does not, so ask it directly.
+    u32 mask = 0;
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        if (texture_cache.IsRegionGpuModified(addr, size)) {
+            mask |= 1;
+        }
+    }
+    if (query_cache.IsRegionGpuModified(addr, size) || query_cache.HasPendingReleaseIn(addr, size)) {
+        mask |= 2;
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (buffer_cache.IsRegionGpuModified(addr, size)) {
+            mask |= 4;
+        }
+    }
+    return mask;
+}
+
 void RasterizerVulkan::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                  u32 size) {
     buffer_cache.BindGraphicsUniformBuffer(stage, index, gpu_addr, size);

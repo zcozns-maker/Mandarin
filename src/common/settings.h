@@ -643,6 +643,12 @@ struct Values {
     // flickering, without fixing the black ground.
     SwitchableSetting<bool> ns2_mme_pending_release{linkage, false, "ns2_mme_pending_release",
                                                     Category::RendererAdvanced};
+    // ZiK build13: targeted Safe DMA. Command-list chunks whose words may still be only in a host
+    // cache (texture cache, query cache, or buffer cache pages the GPU-written page map missed)
+    // are flushed from every cache before they are read, as Safe DMA's reads do for every chunk,
+    // and the GPU thread split keeps running. DK Bananza's ground needs Safe DMA otherwise.
+    SwitchableSetting<bool> ns2_pb_flush_all_caches{linkage, false, "ns2_pb_flush_all_caches",
+                                                    Category::RendererAdvanced};
     // ZiK build11: copy every GPU-written buffer back to guest memory at fences (Switch 2
     // titles skip this by default for speed). Pokopia's sky needs it (Zortos 60ef6d2750).
     SwitchableSetting<bool> ns2_buffer_downloads{linkage, false, "ns2_buffer_downloads",

@@ -108,6 +108,8 @@ public:
     /// guest write still waits for the host GPU to finish the work before it (fences, and every
     /// release in accurate GPU mode).
     std::optional<u32> PendingRelease(DAddr cpu_addr);
+    /// ZiK build13: whether a release in [cpu_addr, cpu_addr + size) still waits for its fence.
+    bool HasPendingReleaseIn(DAddr cpu_addr, size_t size);
 
     // Async downloads
     void CommitAsyncFlushes();

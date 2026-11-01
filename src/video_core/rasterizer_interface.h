@@ -70,6 +70,14 @@ public:
         return std::nullopt;
     }
 
+    /// ZiK build13: which caches hold GPU-written data of [addr, addr + size) that guest memory
+    /// lacks: 1 texture cache (an image marked GPU-modified, at every GPU accuracy), 2 query cache
+    /// (a dirty query or a fence-pending release), 4 buffer cache (a GPU-modified range). Only
+    /// where those caches may be used: the GPU thread split's back, or its front after a drain.
+    [[nodiscard]] virtual u32 Ns2DirtyCaches(DAddr addr, u64 size) {
+        return 0;
+    }
+
     /// Signal an uniform buffer binding
     virtual void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                            u32 size) = 0;

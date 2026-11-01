@@ -260,6 +260,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "reaches a fence, it takes that pending value instead of what guest memory holds now\n"
               "(upstream Eden-NS2 69debf7d76, for DK Bananza caves). Off by default: in DK Bananza it\n"
               "coincides with the HUD flickering."));
+    INSERT(Settings, ns2_pb_flush_all_caches,
+           tr("Switch 2 / Eden-NS2: flush GPU-written command data (targeted Safe DMA)"),
+           tr("Before the GPU reads a command list, copies back any part of it that the GPU wrote and\n"
+              "that is still only in a host cache (textures, queries, buffers), as Safe DMA does, but\n"
+              "only for those parts and without stopping the GPU thread split. Logs what it finds\n"
+              "(\"NS2 PB data\"). For DK Bananza's black ground."));
     INSERT(Settings, ns2_hang_dump_seconds, tr("Switch 2 / Eden-NS2: Hang dump after (s, 0 = off)"),
            tr("When no frame is shown for this many seconds, writes what every game thread is waiting on to the log.\n"
               "Diagnostic only."));

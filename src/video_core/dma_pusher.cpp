@@ -4,8 +4,12 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <mutex>
+#include <string>
+#include <unordered_set>
 
 #include "common/ns2_options.h"
 #include "common/logging.h"
@@ -26,6 +30,48 @@ namespace Tegra {
 
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
+
+namespace {
+// ZiK build13: GPU-written command data (ns2_pb_flush_all_caches, EDEN_NX2_PB_DIAG=1).
+constexpr u32 DirtyTexture = 1;
+constexpr u32 DirtyQuery = 2;
+constexpr u32 DirtyBuffer = 4;
+
+bool PbDiagOnly() {
+    static const bool diag = [] {
+        const char* value = std::getenv("EDEN_NX2_PB_DIAG");
+        return value != nullptr && value[0] == '1';
+    }();
+    return diag;
+}
+
+std::string DirtyNames(u32 mask, bool marked) {
+    std::string names;
+    const auto add = [&names](const char* name) {
+        if (!names.empty()) {
+            names += '+';
+        }
+        names += name;
+    };
+    if (mask & DirtyTexture) {
+        add("texture");
+    }
+    if (mask & DirtyQuery) {
+        add("query");
+    }
+    if (mask & DirtyBuffer) {
+        add(marked ? "buffer" : "buffer-unmarked");
+    }
+    return names;
+}
+
+std::mutex pb_log_mutex;
+std::unordered_set<u64> pb_logged_pages;
+u32 pb_log_lines{};
+std::atomic<u64> pb_flushed_chunks{};
+std::atomic<u64> pb_learned_pages{};
+std::atomic<bool> pb_announced{};
+} // Anonymous namespace
 
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
     : system{system_}
@@ -173,7 +219,17 @@ bool DmaPusher::Step() {
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             command_resume_offset += ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else {
-            FlushGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            // ZiK build13: ns2_pb_flush_all_caches flushes, from every cache, the chunks whose
+            // words the GPU may have written (Safe DMA's read, for those chunks only).
+            const size_t chunk_bytes = size_t{header.size} * sizeof(u32);
+            if (Settings::values.ns2_pb_flush_all_caches.GetValue()) {
+                FlushGpuWrittenCommandData(dma_state.dma_get, chunk_bytes, true);
+            } else {
+                FlushGpuWrittenCommands(dma_state.dma_get, chunk_bytes);
+                if (PbDiagOnly()) {
+                    FlushGpuWrittenCommandData(dma_state.dma_get, chunk_bytes, false);
+                }
+            }
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::UnsafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             command_resume_offset += ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
@@ -402,6 +458,87 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     }
     memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
     return true;
+}
+
+void DmaPusher::FlushGpuWrittenCommandData(GPUVAddr address, size_t size, bool flush) {
+    if (!g_nx2_ampere.load(std::memory_order_relaxed) || size == 0 || rasterizer == nullptr) {
+        return;
+    }
+    if (!pb_announced.exchange(true)) {
+        LOG_INFO(HW_GPU, "NS2 PB data: {} (ns2_pb_flush_all_caches / EDEN_NX2_PB_DIAG)",
+                 flush ? "targeted command-data flush on" : "diagnostic only, no flushes");
+    }
+    bool written = false;
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        if (const auto device = memory_manager.GpuToCpuAddress(page); device && Nx2IsGpuWritten(*device)) {
+            written = true;
+            break;
+        }
+    }
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (written || !split.Active()) {
+        // The caches belong to the split's back: let it run what was queued (the work that
+        // writes these words among it) first. Without the split this thread owns them.
+        split.Drain();
+        ScanGpuWrittenCommandData(address, size, flush, written ? 'F' : 'I', dma_state.method,
+                                  dma_state.subchannel);
+        return;
+    }
+    // Pages not known to be GPU-written: check when the back reaches this point instead of
+    // stalling the front for every chunk. A hit marks the pages, so their next read (command
+    // lists are rebuilt in place every frame) takes the drain-and-flush path above.
+    split.Defer([this, address, size, method = dma_state.method, subchannel = dma_state.subchannel] {
+        ScanGpuWrittenCommandData(address, size, false, 'B', method, subchannel);
+    });
+}
+
+u32 DmaPusher::ScanGpuWrittenCommandData(GPUVAddr address, size_t size, bool flush, char path,
+                                         u32 method, u32 subchannel) {
+    u32 all = 0;
+    const GPUVAddr end = address + size;
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < end; page += 0x1000) {
+        const GPUVAddr begin = (std::max)(page, address);
+        const u64 bytes = (std::min)(page + 0x1000, end) - begin;
+        const auto device = memory_manager.GpuToCpuAddress(begin);
+        if (!device) {
+            continue;
+        }
+        const u32 mask = rasterizer->Ns2DirtyCaches(*device, bytes);
+        if (mask == 0) {
+            continue;
+        }
+        all |= mask;
+        const bool marked = Nx2IsGpuWritten(*device);
+        // A buffer range on a marked page is what FlushGpuWrittenCommands already handles.
+        const bool new_kind = (mask & (DirtyTexture | DirtyQuery)) != 0 || !marked;
+        if (!marked) {
+            Nx2MarkGpuWritten(*device, bytes);
+            pb_learned_pages.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!new_kind) {
+            continue;
+        }
+        std::scoped_lock lock{pb_log_mutex};
+        if (pb_log_lines < 64 && pb_logged_pages.insert(*device >> 12).second) {
+            ++pb_log_lines;
+            LOG_WARNING(HW_GPU,
+                        "NS2 PB data hit ({}): gpu={:#x} device={:#x} size={:#x} caches={} "
+                        "chunk={:#x}+{:#x} method={:#x} subchannel={} flush={}",
+                        path == 'F' ? "front, after drain" : path == 'I' ? "inline, no split" : "back, page marked",
+                        begin, *device, bytes, DirtyNames(mask, marked), address, size, method,
+                        subchannel, flush && path != 'B');
+        }
+    }
+    if (all != 0 && flush) {
+        // As Safe DMA's SafeRead: every cache type.
+        memory_manager.FlushRegion(address, size);
+        const u64 count = pb_flushed_chunks.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count == 1 || count % 20000 == 0) {
+            LOG_INFO(HW_GPU, "NS2 PB data: {} command-list chunks flushed so far, {} pages learned",
+                     count, pb_learned_pages.load(std::memory_order_relaxed));
+        }
+    }
+    return all;
 }
 
 void DmaPusher::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {

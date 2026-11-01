@@ -156,6 +156,15 @@ private:
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     /// Returns whether anything was flushed.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
+    /// ZiK build13 (ns2_pb_flush_all_caches, EDEN_NX2_PB_DIAG=1): the unsafe read's targeted
+    /// Safe DMA. Chunks on pages known to be GPU-written are checked against every cache after a
+    /// drain and, with `flush`, flushed from all of them; other chunks are checked on the split's
+    /// back (no front stall), where a hit marks the pages for the next read.
+    void FlushGpuWrittenCommandData(GPUVAddr address, size_t size, bool flush);
+    /// Checks [address, address + size) page by page (back, or front after a drain); logs and
+    /// marks hits, and with `flush` flushes the chunk from all caches. Returns the caches hit.
+    u32 ScanGpuWrittenCommandData(GPUVAddr address, size_t size, bool flush, char path,
+                                  u32 method, u32 subchannel);
     size_t command_resume_offset{};
 
     void SetState(const CommandHeader& command_header);

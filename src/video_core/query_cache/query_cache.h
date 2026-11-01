@@ -381,6 +381,17 @@ std::optional<u32> QueryCacheBase<Traits>::PendingRelease(DAddr cpu_addr) {
 }
 
 template <typename Traits>
+bool QueryCacheBase<Traits>::HasPendingReleaseIn(DAddr cpu_addr, size_t size) {
+    std::scoped_lock lock{pending_releases_mutex};
+    for (const auto& [address, payload] : pending_releases) {
+        if (address >= cpu_addr && address < cpu_addr + size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <typename Traits>
 void QueryCacheBase<Traits>::UnregisterPending() {
     const auto gen_caching_indexing = [](VAddr cur_addr) {
         return std::make_pair<u64, u32>(cur_addr >> Core::DEVICE_PAGEBITS,
