@@ -231,6 +231,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, ns2_undef_zero, tr("Switch 2 / Eden-NS2: Undefined shader values as zero"),
            tr("Shader values the game never wrote read as 0, as on NVIDIA/Switch hardware, instead of\n"
               "driver garbage. Fixes green/blue patches on AMD. Recommended on."));
+    INSERT(Settings, ns2_buffer_downloads,
+           tr("Switch 2 / Eden-NS2: Copy GPU results back at every fence"),
+           tr("Copies all buffer data the GPU writes back to the game's memory at each fence, as\n"
+              "Switch 1 games do. Fixes effects built from GPU-computed values the game reads\n"
+              "(Pokopia's sky, fog and exposure). Costs speed (Pokopia ~60 -> ~42 fps reported)."));
     INSERT(Settings, ns2_serial_pipelines,
            tr("Switch 2 / Eden-NS2: Build pipelines one at a time (AMD Windows)"),
            tr("Compiles graphics/compute pipelines one at a time on AMD's Windows driver, which can\n"

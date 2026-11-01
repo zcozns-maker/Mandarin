@@ -556,6 +556,13 @@ private:
         if (forced >= 0) {
             return forced == 1;
         }
+        // ZiK build11: per-game ns2_buffer_downloads copies every GPU-written buffer back at
+        // fences for Switch 2 titles too. zortos293/Eglantine 60ef6d2750 (GPL) forces this for
+        // Pokemon Pokopia, whose sky/fog/exposure come from GPU-computed values it reads through
+        // a path the buffer cache does not see (black sky without it). Costs speed.
+        if (Settings::values.ns2_buffer_downloads.GetValue()) {
+            return true;
+        }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }
     Common::RangeSet<DAddr> gpu_modified_ranges;

@@ -629,6 +629,10 @@ struct Values {
     // game (off by default: slower first loads). EDEN_NS2_SERIAL_PIPELINES=1/0 still overrides.
     SwitchableSetting<bool> ns2_serial_pipelines{linkage, false, "ns2_serial_pipelines",
                                                  Category::RendererAdvanced};
+    // ZiK build11: copy every GPU-written buffer back to guest memory at fences (Switch 2
+    // titles skip this by default for speed). Pokopia's sky needs it (Zortos 60ef6d2750).
+    SwitchableSetting<bool> ns2_buffer_downloads{linkage, false, "ns2_buffer_downloads",
+                                                 Category::RendererAdvanced};
     // A pipeline the crash guard blacklisted that has a geometry shader is built again without
     // it instead of skipping its draws (AMD crashes on emulated passthrough geometry shaders).
     SwitchableSetting<bool> ns2_drop_crashed_gs{linkage, false, "ns2_drop_crashed_gs",
