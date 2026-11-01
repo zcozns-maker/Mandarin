@@ -750,6 +750,29 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         });
     }
     committed_gpu_modified_ranges.clear();
+    // ZiK build11: one fence's downloads once summed to 51 GB (Pokopia with ns2_buffer_downloads,
+    // 437 s in): the staging allocation failed and Eden aborted. Copy back at most 1 GiB per
+    // fence and drop the rest (logged), which can only leave stale data instead of crashing.
+    if (constexpr u64 MaxDownloadBytes = 1ULL << 30; total_size_bytes > MaxDownloadBytes) {
+        size_t keep = 0;
+        u64 kept_bytes = 0;
+        while (keep < downloads.size() &&
+               downloads[keep].first.dst_offset + downloads[keep].first.size <= MaxDownloadBytes) {
+            kept_bytes = Common::AlignUp(downloads[keep].first.dst_offset +
+                                             downloads[keep].first.size, 64ULL);
+            ++keep;
+        }
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_ERROR(HW_GPU,
+                      "Fence download of {} MiB in {} copies (largest {} MiB) is too large; "
+                      "copying back the first {} MiB only",
+                      total_size_bytes >> 20, downloads.size(), largest_copy >> 20,
+                      kept_bytes >> 20);
+        }
+        downloads.erase(downloads.begin() + keep, downloads.end());
+        total_size_bytes = kept_bytes;
+    }
     if (downloads.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
         return;
