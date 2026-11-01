@@ -55,6 +55,8 @@ struct LoweredProgram {
     std::vector<u32> source_instruction_offsets;
     u32 source_size{};
     u32 required_texture_buffer = ~0U;
+    // ZiK build11c: CSMTEST trivial-reject tests lowered to a constant false predicate.
+    u32 csmtest_trivial_reject_false{};
     u32 error_offset{};
     std::string_view error;
 
@@ -4233,6 +4235,29 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code,
             const bool no_outputs = (insn.words[0] & ~0xf000U) == 0x80d &&
                                     ((insn.words[1] >> 28) & 3) == 0 && (insn.words[1] >> 30) != 0 &&
                                     insn.words[2] == 0x03fe0000U;
+            // ZiK build11c, same per-game setting: the predicate-output trivial-reject test.
+            // Evidence: nvdisasm (CUDA 13.4, -b SM86) decodes Kirby Air Riders' instances
+            // [0000780d 80000000 03f06000 000fda00/000fe400] as "CSMTEST.A.FCSM_TR.AND P0, PT, 0x0, PT"
+            // (vtgmode A=2 at bits 62-63, Sa=0, ccmp FCSM_TR=6 at 76-78, bop AND, Pu=P0 at 81-83,
+            // Pv=PT, Pp=PT, !Pp clear; verified by flipping each bit through nvdisasm). In all 7
+            // captured shaders (test-launch\kirby-shaders\disasm) Pu is read exactly once, by the
+            // very next "@P0 EXIT", and never again: an early exit for vertices of primitives that
+            // the clip-state machine trivially rejected (fully off-screen). Fixed-function clipping
+            // discards those primitives anyway, so Pu = false (never rejected, run the whole shader)
+            // only costs speed. Approximation, not a decode of the hidden clip state. Only this exact
+            // encoding (any guard, any Pu but PT) matches; every other CSMTEST form stays rejected.
+            const bool trivial_reject_test = (insn.words[0] & ~0xf000U) == 0x80d &&
+                                             insn.words[1] == 0x80000000U &&
+                                             (insn.words[2] & ~(7U << 17)) == 0x03f06000U &&
+                                             insn.Bits(81, 3) != 7;
+            if (trivial_reject_test) {
+                if (!LowerGroupEnabled("csmtest_noop")) return fail(index, "unsupported native opcode");
+                // PSETP.AND.AND Pu, PT, !PT, PT, PT under the original guard: Pu = false.
+                emit(0x5090000000000000ULL | predicate | (u64{insn.Bits(81, 3)} << 3) | 7 |
+                     (u64{0xf} << 12) | (u64{7} << 29) | (u64{7} << 39));
+                ++result.csmtest_trivial_reject_false;
+                break;
+            }
             if (!no_outputs) return fail(index, "native CSMTEST/VOTE_VTG with predicate outputs");
             if (!LowerGroupEnabled("csmtest_noop")) return fail(index, "unsupported native opcode");
             emit(0x50b0000000000f00ULL | predicate); // NOP; writes nothing visible to the shader.

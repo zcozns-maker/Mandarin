@@ -674,6 +674,12 @@ void GenericEnvironment::InitializeNativeCode(u32 source_header_size,
         throw Shader::RuntimeError("Native shader at {:#x}, instruction {:#x}: {}",
                                    program_base, lowered.error_offset, lowered.error);
     }
+    if (lowered.csmtest_trivial_reject_false != 0) {
+        // ZiK build11c: logged once per shader build (ns2_lower_csmtest_noop).
+        LOG_INFO(Shader, "Native shader at {:#x} (key {:016x}): {} CSMTEST trivial-reject test(s) lowered to false "
+                 "(approximation; hardware clipping discards off-screen primitives)",
+                 program_base, Shader::Ampere::NativeProgramKey(native), lowered.csmtest_trivial_reject_false);
+    }
     if (lowered.required_texture_buffer != ~0U) {
         // Native TEX carries its cbuf index explicitly; TEXS obtains it from the environment.
         texture_bound = lowered.required_texture_buffer;
