@@ -1,6 +1,6 @@
 # Mandarin
 
-A fork of the [Eden](https://git.eden-emu.dev/eden-emu/eden) Nintendo Switch emulator that runs
+An experimental of the [Eden](https://git.eden-emu.dev/eden-emu/eden) Nintendo Switch emulator that runs
 Nintendo Switch 2 games.
 
 ![Donkey Kong Bananza gameplay](docs/ns2/screenshots/bananza-cave.png)
