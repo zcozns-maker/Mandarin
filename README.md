@@ -1,4 +1,4 @@
-# Eden NS2
+# Mandarin
 
 A fork of the [Eden](https://git.eden-emu.dev/eden-emu/eden) Nintendo Switch emulator that runs
 Nintendo Switch 2 games.
@@ -47,7 +47,7 @@ Nintendo Switch 2 games.
 3. Copy the MinGW runtime DLLs (Qt and its dependencies) next to `build/bin/eden.exe` and add a
    `build/bin/qt.conf` containing `[Paths]` / `Plugins = plugins` (see [docs/ns2/NOTES.md](docs/ns2/NOTES.md)).
 
-The NS2 patch's MSVC script (`build-eden-msvc.bat`) is included but has not been tried with this tree.
+The NS2 patch's MSVC script (`build-mandarin-msvc.bat`) is included but has not been tried with this tree.
 
 ## Building (Linux)
 

@@ -71,3 +71,13 @@ vulkansdk*.exe
 
 # Build-time generated external sources
 externals/generated
+
+# Mandarin local development notes and user data
+/NX2_NOTES.md
+/NX2_GPU_THREAD_SPLIT.md
+/build/user/
+
+# Mandarin local development notes and user data
+/NX2_NOTES.md
+/NX2_GPU_THREAD_SPLIT.md
+/build/user/

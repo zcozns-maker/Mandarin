@@ -5,7 +5,7 @@ if errorlevel 1 goto :failed
 
 set "SOURCE_DIR=%~dp0"
 if not exist "%SOURCE_DIR%CMakeLists.txt" (
-    echo ERROR: Put this file in the Eden source folder beside CMakeLists.txt.
+    echo ERROR: Put this file in the Mandarin source folder beside CMakeLists.txt.
     goto :failed
 )
 set "BUILD_DIR=%SOURCE_DIR%build-msvc-gui-relwithdebinfo"
@@ -92,7 +92,7 @@ echo Configuring GUI - MSVC x64, RelWithDebInfo...
 if errorlevel 1 goto :failed
 
 echo.
-echo Building Eden GUI...
+echo Building Mandarin GUI...
 "%CMAKE_EXE%" --build "%BUILD_DIR%" --config RelWithDebInfo --target yuzu --parallel "%BUILD_JOBS%"
 if errorlevel 1 goto :failed
 
